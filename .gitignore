@@ -1,0 +1,21 @@
+.env
+.env.*
+*.cookies
+.local-secrets/
+*.har
+
+# Python / uv
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+dist/
+
+# Internal — kept local, not published
+/docs/
+/verify_phase0.py
+
+# Downloaded tickets / invoices / partial downloads
+*.pdf
+*.pkpass
+*.part
