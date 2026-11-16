@@ -34,6 +34,13 @@ JOURNEY_SEARCH_PATH = "/browsing/journey/v1/orientations/journey-search"
 NSV_FIRST_SALE_DATE = date(2027, 1, 25)
 LEGACY_SHOP_URL = "https://venta.renfe.com/vol/"
 
+# Where a search continues in the browser, to pick the train and pay (checked 2026-11-16 as a guest, nothing
+# bought). www.renfe.com takes the route and the date in the URL, for the dates the legacy shop sells. The
+# new shop takes the route and "one way" in the URL but not the date: that comes from a cookie www.renfe.com
+# sets, so on the new shop the date is picked on the page.
+WWW_SEARCH_URL = "https://www.renfe.com/es/es/buscador-billetes"
+SHOP_SEARCH_URL = f"{WEB_ORIGIN}/coext/search"
+
 FARE_BATCH = 3  # trains per journey-search call, as the web app sends them (Renfe refuses 22 per call)
 FARE_WORKERS = 3  # journey-search calls in flight at once, as the web app keeps them (2026-11-15)
 EXCLUDED_PRODUCT_TYPES = ("DG", "BK")  # sent by the web app on every search; meaning unconfirmed

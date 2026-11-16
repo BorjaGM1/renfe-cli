@@ -16,14 +16,15 @@ try:  # Typer >= 0.29 vendors Click; older Typer uses the click package
 except ImportError:  # pragma: no cover
     from click import exceptions as click_exceptions
 
-from . import package_version, search as search_mod, stations as stations_mod
+from . import config, package_version, search as search_mod, shop as shop_mod, stations as stations_mod
 from .client import RsvClient
 from .errors import RenfeError, UsageError
 from .output import render, render_error
 
 app = typer.Typer(
     name="renfe",
-    help="Search Renfe trains and fares over Renfe's own web API. No account needed. Output is JSON.",
+    help="Search Renfe trains and fares over Renfe's own web API, then open Renfe's website to buy. "
+         "No account needed. Output is JSON.",
     no_args_is_help=True,
     add_completion=False,
     # Rich tracebacks print frame locals, which include the bearer and the api key.
@@ -64,6 +65,11 @@ def _emit(produce: Callable[[], Any]) -> None:
         raise typer.Exit(int(partial.get("exit_code") or 5))
 
 
+# A safety bound, not Renfe's rule: www.renfe.com's search form loads at most 12 months of prices
+# (DEFAULT_MAX_MONTHS_TO_CHARGE in its script, 2026-11-16). Beyond that a date is a typo.
+_MAX_DAYS_AHEAD = 366
+
+
 def _parse_date(text: str) -> date:
     today = datetime.now(search_mod.MADRID).date()
     word = text.strip().lower()
@@ -72,9 +78,16 @@ def _parse_date(text: str) -> date:
     if word in ("tomorrow", "mañana", "manana"):
         return today + timedelta(days=1)
     try:
-        return date.fromisoformat(text.strip())
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", word):
+            raise ValueError
+        day = date.fromisoformat(word)
     except ValueError:
         raise UsageError(f"--date must be YYYY-MM-DD, today or tomorrow (got {text!r})") from None
+    if day < today:
+        raise UsageError(f"--date {day.isoformat()} is in the past")
+    if day > today + timedelta(days=_MAX_DAYS_AHEAD):
+        raise UsageError(f"--date {day.isoformat()} is more than a year ahead; Renfe doesn't sell that far")
+    return day
 
 
 def _parse_time(text: str | None) -> time | None:
@@ -147,6 +160,69 @@ def search_cmd(
             gone = f"No more trains today after {after_time.strftime('%H:%M')}; try --date tomorrow."
             out["notice"] = f"{out['notice']} {gone}" if out["notice"] else gone
         return out
+
+    _emit(produce)
+
+
+def _stdout_is_terminal() -> bool:
+    return sys.stdout.isatty()
+
+
+def _service_parts(text: str) -> list[str] | None:
+    """`03081` -> ["3081"]; `00601 + 00533` -> ["601", "533"]; None when it isn't a train number."""
+    compact = re.sub(r"\s*\+\s*", "+", text.strip())  # spaces allowed around "+", not inside a number
+    if not re.fullmatch(r"[0-9]{1,6}(\+[0-9]{1,6})*", compact):
+        return None
+    return [part.lstrip("0") or "0" for part in compact.split("+")]
+
+
+@app.command("open")
+def open_cmd(
+    origin: Annotated[str, typer.Argument(help="From: a station name (Madrid, Atocha) or code (MADRI, 60000).")],
+    destination: Annotated[str, typer.Argument(help="To: a station name or code.")],
+    date_: Annotated[str, typer.Option("--date", "-d", help="Travel date: YYYY-MM-DD, today or tomorrow.")] = "today",
+    train: Annotated[str | None, typer.Option(
+        "--train", "-t", help="A service number from `renfe search` (e.g. 03081): checked against that day's "
+                              "trains and shown, so you know which one to pick on the page.")] = None,
+    browser: Annotated[bool | None, typer.Option(
+        "--browser/--no-browser",
+        help="Open the link in your default browser. Default: only when run from a terminal, so scripts "
+             "and agents get the link without a browser popping up.")] = None,
+) -> None:
+    """Open Renfe's website on this search, to pick the train and pay there. The CLI never books or pays."""
+
+    def produce() -> dict:
+        day = _parse_date(date_)
+        wanted = _service_parts(train) if train is not None else None
+        if train is not None and wanted is None:
+            raise UsageError(f"--train must be a train number such as 03081 or 00601+00533 (got {train!r})")
+        with make_client() as client:
+            every = stations_mod.load(client)
+            src, dst = stations_mod.resolve(origin, every), stations_mod.resolve(destination, every)
+            if src.code == dst.code:
+                raise UsageError("origin and destination are the same station")
+            chosen, notices = None, []
+            if wanted is not None:
+                names = {s.code: s.name for s in every}
+                found = search_mod.search(client, src, dst, day, names=names, fares=False)
+                chosen = next((t for t in found["trains"] if _service_parts(t["service"]) == wanted), None)
+                sold_here = day >= config.NSV_FIRST_SALE_DATE
+                if found["notice"] and sold_here:  # e.g. Renfe reported more trains than it returned
+                    notices.append(found["notice"])
+                if chosen is None and sold_here and not found["notice"]:
+                    raise UsageError(f"no train {train} from {src.name} to {dst.name} on {day.isoformat()}; "
+                                     "`renfe search` lists them")
+                if chosen is None:  # the list the CLI sees is incomplete (before the cut-off, or Renfe said so)
+                    notices.append(f"Train {train} isn't in the list this CLI can see for {day.isoformat()}, "
+                                   "which is incomplete; look for it on Renfe's page.")
+                elif datetime.fromisoformat(chosen["departure"]) < datetime.now(search_mod.MADRID):
+                    notices.append(f"Train {chosen['service']} has already left "
+                                   f"({chosen['departure'][11:16]}).")
+        page = shop_mod.link(src, dst, day)
+        launch = _stdout_is_terminal() if browser is None else browser  # scripts and agents: link only
+        opened = shop_mod.open_in_browser(page["url"]) if launch else False
+        return {"date": day.isoformat(), "origin": src.to_dict(), "destination": dst.to_dict(),
+                "train": chosen, "notice": " ".join(notices) or None, "shop": page, "opened": opened}
 
     _emit(produce)
 

@@ -166,3 +166,154 @@ def test_today_with_every_train_gone_says_so(fake, monkeypatch):
     assert result.exit_code == 0
     out = json.loads(result.stdout)
     assert out["count"] == 0 and "No more trains today after 23:30" in out["notice"]
+
+
+@pytest.fixture
+def opened(monkeypatch):
+    """Records the URLs `renfe open` asks the browser to open, instead of opening them."""
+    import webbrowser
+
+    urls = []
+    monkeypatch.setattr(webbrowser, "open", lambda url, new=0: urls.append(url) or True)
+    return urls
+
+
+def test_search_includes_the_shop_link(fake):
+    out = json.loads(invoke("search", "Madrid", "Barcelona", "--date", "2027-01-29", "--limit", "1").stdout)
+    assert out["shop"]["url"].startswith("https://venta.rsv.renfe.com/coext/search?")
+
+
+def test_open_without_a_train_sends_no_search(fake, opened):
+    result = invoke("open", "Madrid", "Barcelona", "--date", "2026-11-20", "--browser")
+    assert result.exit_code == 0, result.output
+    out = json.loads(result.stdout)
+    assert out["opened"] is True and out["train"] is None
+    assert opened == [out["shop"]["url"]] and "departure-date=2026-11-20" in opened[0]
+    assert config.SEARCH_TRAVEL_PATH not in fake.paths()  # only the station list was needed
+
+
+def test_open_with_a_train_checks_it_and_shows_it(fake, opened):
+    result = invoke("open", "Madrid", "Barcelona", "-d", "2027-01-29", "--train", "3100", "--browser")  # leading zero optional
+    assert result.exit_code == 0, result.output
+    out = json.loads(result.stdout)
+    assert out["train"]["service"] == "03100" and out["train"]["departure"].startswith("2027-01-29T09:00")
+    assert len(opened) == 1 and "originUicStationCode=MADRI" in opened[0]
+    assert config.JOURNEY_SEARCH_PATH not in fake.paths()  # the check needs the timetable only
+
+
+def test_open_with_a_train_that_has_a_change(fake, opened):
+    out = json.loads(invoke("open", "Madrid", "Barcelona", "-d", "2027-01-29", "-t", "600 + 500", "--browser").stdout)
+    assert out["train"]["service"] == "00600+00500"
+
+
+def test_open_with_an_unknown_train_is_a_usage_error_and_opens_nothing(fake, opened):
+    result = invoke("open", "Madrid", "Barcelona", "-d", "2027-01-29", "--train", "99999", "--browser")
+    assert result.exit_code == 2
+    assert "no train 99999" in json.loads(result.stderr)["error"]["message"]
+    assert opened == []
+
+
+def test_open_no_browser_only_prints_the_link(fake, opened):
+    out = json.loads(invoke("open", "Madrid", "Barcelona", "-d", "2027-01-29", "--no-browser").stdout)
+    assert out["opened"] is False and opened == [] and out["shop"]["url"]
+
+
+def test_open_before_the_cutoff_with_a_train_it_cant_see_still_opens(fake, opened):
+    """Before 25 Jan 2027 the CLI's list is incomplete, so a missing train isn't an error."""
+    result = invoke("open", "Madrid", "Barcelona", "-d", "2026-11-20", "--train", "03141", "--browser")
+    assert result.exit_code == 0, result.output
+    out = json.loads(result.stdout)
+    assert out["train"] is None and "look for it on Renfe's page" in out["notice"]
+    assert "can't search" not in out["notice"]  # the search's own legacy-shop notice isn't repeated here
+    assert len(opened) == 1 and "departure-date=2026-11-20" in opened[0]
+
+
+def test_open_without_a_terminal_only_prints_the_link(fake, opened):
+    """CliRunner's stdout isn't a TTY, like a script's or an agent's: no browser unless --browser."""
+    out = json.loads(invoke("open", "Madrid", "Barcelona", "-d", "2027-01-29").stdout)
+    assert out["opened"] is False and opened == []
+
+
+@pytest.mark.parametrize("train", ["", "+", "abc", "03081x", "1++2", "1234567", "3 100", "\u0663\u0661\u0660\u0660"])
+def test_open_rejects_what_isnt_a_train_number(fake, opened, train):
+    result = invoke("open", "Madrid", "Barcelona", "-d", "2027-01-29", "--train", train, "--browser")
+    assert result.exit_code == 2 and "--train must be a train number" in json.loads(result.stderr)["error"]["message"]
+    assert opened == [] and config.SEARCH_TRAVEL_PATH not in fake.paths()
+
+
+@pytest.mark.parametrize("day,code", [("2027-01-24", 0), ("2027-01-25", 2)])
+def test_open_unknown_train_around_the_cutoff(fake, opened, day, code):
+    """On the legacy shop's last day the CLI's list is incomplete (a notice); from the cut-off it's an error."""
+    result = invoke("open", "Madrid", "Barcelona", "-d", day, "--train", "99999", "--browser")
+    assert result.exit_code == code
+    assert len(opened) == (1 if code == 0 else 0)
+
+
+def test_open_unknown_train_when_renfe_says_the_list_is_short(monkeypatch, tmp_path, opened):
+    """From the cut-off, if Renfe reports more trains than it returned, a train not seen still opens."""
+    from fakes import TRAVEL_OPTIONS
+
+    short = dict(TRAVEL_OPTIONS, total_count=9)
+    handler = FakeRenfe(**{config.SEARCH_TRAVEL_PATH: lambda r: httpx.Response(200, json=short)})
+    monkeypatch.setattr(cli, "make_client", lambda: RsvClient(transport=httpx.MockTransport(handler), spacing=0))
+    result = invoke("open", "Madrid", "Barcelona", "-d", "2027-01-29", "--train", "99999", "--browser")
+    assert result.exit_code == 0, result.output
+    out = json.loads(result.stdout)
+    assert "reported 9 trains" in out["notice"] and "isn't in the list" in out["notice"] and len(opened) == 1
+
+
+def test_open_today_says_when_the_train_already_left(fake, opened, monkeypatch):
+    """Frozen "now" is 2026-11-15 10:00 Madrid; train 03100 leaves at 09:00 local."""
+    from datetime import datetime as real_datetime
+
+    from renfe import search as search_mod
+
+    class LaterThatDay(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return real_datetime(2027, 1, 29, 12, 0, tzinfo=search_mod.MADRID)
+
+    monkeypatch.setattr(cli, "datetime", LaterThatDay)
+    out = json.loads(invoke("open", "Madrid", "Barcelona", "-d", "today", "--train", "03100").stdout)
+    assert out["train"]["service"] == "03100" and "already left (09:00)" in out["notice"]
+
+
+def test_open_same_station_is_a_usage_error(fake, opened):
+    result = invoke("open", "Madrid", "MADRI", "-d", "2027-01-29", "--browser")
+    assert result.exit_code == 2 and opened == []
+
+
+def test_open_block_during_the_train_check_opens_nothing(monkeypatch, tmp_path, opened):
+    handler = FakeRenfe(**{config.SEARCH_TRAVEL_PATH: lambda r: httpx.Response(429, json={})})
+    monkeypatch.setattr(cli, "make_client", lambda: RsvClient(transport=httpx.MockTransport(handler), spacing=0))
+    result = invoke("open", "Madrid", "Barcelona", "-d", "2027-01-29", "--train", "03100", "--browser")
+    assert result.exit_code == 5 and result.stdout == "" and opened == []
+
+
+def test_open_browser_failure_is_reported_not_fatal(fake, monkeypatch):
+    import webbrowser
+
+    def fails(url, new=0):
+        raise webbrowser.Error("no runnable browser")
+
+    monkeypatch.setattr(webbrowser, "open", fails)
+    result = invoke("open", "Madrid", "Barcelona", "-d", "2027-01-29", "--browser")
+    assert result.exit_code == 0 and json.loads(result.stdout)["opened"] is False
+
+
+@pytest.mark.parametrize("day,needle", [
+    ("2026-11-14", "in the past"),
+    ("2028-01-01", "more than a year ahead"),
+    ("9999-12-31", "more than a year ahead"),
+    ("20261120", "YYYY-MM-DD"),
+    ("2026-W47-5", "YYYY-MM-DD"),
+])
+def test_dates_out_of_range_or_odd_formats_are_usage_errors(fake, day, needle):
+    result = invoke("search", "Madrid", "Barcelona", "--date", day)
+    assert result.exit_code == 2 and needle in json.loads(result.stderr)["error"]["message"]
+
+
+def test_open_from_a_terminal_opens_the_browser_by_default(fake, opened, monkeypatch):
+    monkeypatch.setattr(cli, "_stdout_is_terminal", lambda: True)
+    out = json.loads(invoke("open", "Madrid", "Barcelona", "-d", "2027-01-29").stdout)
+    assert out["opened"] is True and opened == [out["shop"]["url"]]

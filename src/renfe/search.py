@@ -13,7 +13,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from . import config
+from . import config, shop
 from .client import RsvClient
 from .errors import ApiShapeError, BlockedError, RenfeError
 from .stations import Station
@@ -302,8 +302,8 @@ def search(
         # Fri 20 Nov 2026: 8 trains here vs 24 on the legacy shop (all 8 among them); the web never shows
         # this list (the new shop's calendar won't pick dates before the cut-off).
         notices.append(f"Trips before {config.NSV_FIRST_SALE_DATE.isoformat()} are sold on Renfe's legacy shop "
-                       f"({config.LEGACY_SHOP_URL}), which this CLI doesn't support yet: no fares, and this "
-                       "list may be missing trains.")
+                       f"({config.LEGACY_SHOP_URL}), which this CLI can't search: no fares, and this list may be "
+                       "missing trains. `shop.url` opens the full list on Renfe's website.")
 
     for train in trains:
         for leg in train["legs"]:
@@ -322,6 +322,7 @@ def search(
         "notice": " ".join(notices) or None,
         "count": len(trains),
         "trains": trains,
+        "shop": shop.link(origin, destination, day),  # where to pick the train and pay
     }
     if fares_error:
         out["fares_error"] = fares_error
