@@ -1,0 +1,15 @@
+import sys
+from pathlib import Path
+
+import pytest
+
+from renfe import config
+
+sys.path.insert(0, str(Path(__file__).parent))  # lets tests import the shared `fakes` module
+
+
+@pytest.fixture(autouse=True)
+def isolated_cache(tmp_path_factory, monkeypatch):
+    """Every test gets its own cache dir: no test reads or writes the real session, stations or pace
+    files (the live test included)."""
+    monkeypatch.setenv(config.CACHE_ENV, str(tmp_path_factory.mktemp("cache")))

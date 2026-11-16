@@ -1,0 +1,43 @@
+[project]
+# PyPI's "renfe-cli" is taken (an unrelated timetable tool); pick the published name before any release.
+name = "renfe-cli"
+version = "0.1.0"
+description = "JSON-first CLI for Renfe trains: search timetables and fares over Renfe's own web API, no account needed"
+readme = "README.md"
+license = "MIT"
+authors = [{ name = "luisgonzaleznf", email = "47302972+luisgonzaleznf@users.noreply.github.com" }]
+keywords = ["renfe", "trains", "spain", "ave", "cli", "json"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Environment :: Console",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Utilities",
+]
+requires-python = ">=3.12"
+dependencies = [
+    "httpx[http2]>=0.28.1",
+    "typer>=0.27.3",
+]
+
+[project.scripts]
+renfe = "renfe.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "renfe"
+# Never ship captures or booking data that end up under src/ (the build backend ignores .gitignore).
+source-exclude = ["**/.local-secrets", "**/.env", "**/.env.*", "**/*.cookies", "**/*.har", "**/*.pdf", "**/*.part", "**/*.pkpass"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+markers = ["live: calls the real Renfe API; skipped unless RENFE_LIVE=1"]

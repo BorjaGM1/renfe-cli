@@ -19,3 +19,6 @@ dist/
 *.pdf
 *.pkpass
 *.part
+
+# Playwright MCP snapshots (recon only)
+.playwright-mcp/
