@@ -1,6 +1,7 @@
 import sys
 from pathlib import Path
 
+import httpx
 import pytest
 
 from renfe import config
@@ -17,6 +18,18 @@ def no_real_browser(monkeypatch):
         raise AssertionError("a test tried to open a real browser")
 
     monkeypatch.setattr(webbrowser, "open", refuse)
+
+
+@pytest.fixture(autouse=True)
+def no_real_network(request, monkeypatch):
+    """Offline tests never reach Renfe: every request must go through a MockTransport. The live tests may."""
+    if request.node.get_closest_marker("live"):
+        return
+
+    def refuse(self, req):
+        raise AssertionError(f"a test tried to reach the real network ({req.url.host})")
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", refuse)
 
 
 @pytest.fixture(autouse=True)

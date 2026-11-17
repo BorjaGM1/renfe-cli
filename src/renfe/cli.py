@@ -16,7 +16,7 @@ try:  # Typer >= 0.29 vendors Click; older Typer uses the click package
 except ImportError:  # pragma: no cover
     from click import exceptions as click_exceptions
 
-from . import config, package_version, search as search_mod, shop as shop_mod, stations as stations_mod
+from . import package_version, search as search_mod, shop as shop_mod, stations as stations_mod
 from .client import RsvClient
 from .errors import RenfeError, UsageError
 from .output import render, render_error
@@ -158,7 +158,8 @@ def search_cmd(
     fares: Annotated[bool, typer.Option(help="Also fetch fares (one extra request per 3 trains).")] = True,
     limit: Annotated[int, typer.Option(min=1, max=200, help="Most trains to return, earliest first.")] = 10,
 ) -> None:
-    """Trains from ORIGIN to DESTINATION on a date, with fares for one adult when Renfe's new system sells it."""
+    """Trains from ORIGIN to DESTINATION on a date, with fares for one adult (before 25 Jan 2027, from Renfe's
+    legacy shop)."""
 
     def produce() -> dict:
         day, after_time = _parse_date(date_), _parse_time(after)
@@ -216,13 +217,14 @@ def open_cmd(
             if wanted is not None:
                 found = search_mod.search(client, src, dst, day, names=_names(src, dst), fares=False)
                 chosen = next((t for t in found["trains"] if _service_parts(t["service"]) == wanted), None)
-                sold_here = day >= config.NSV_FIRST_SALE_DATE
-                if found["notice"] and sold_here:  # e.g. Renfe reported more trains than it returned
+                # Without fares, search() has a notice only when its list may be missing trains: the legacy shop
+                # failed before the cut-off, or Renfe's new system reported more trains than it returned.
+                if found["notice"]:
                     notices.append(found["notice"])
-                if chosen is None and sold_here and not found["notice"]:
+                if chosen is None and not found["notice"]:
                     raise UsageError(f"no train {train} from {src.name} to {dst.name} on {day.isoformat()}; "
                                      "`renfe search` lists them")
-                if chosen is None:  # the list the CLI sees is incomplete (before the cut-off, or Renfe said so)
+                if chosen is None:
                     notices.append(f"Train {train} isn't in the list this CLI can see for {day.isoformat()}, "
                                    "which is incomplete; look for it on Renfe's page.")
                 elif datetime.fromisoformat(chosen["departure"]) < datetime.now(search_mod.MADRID):

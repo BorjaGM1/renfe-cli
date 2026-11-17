@@ -30,7 +30,7 @@ SEARCH_TRAVEL_PATH = "/browsing/traveloptions/v1/search-travel"
 JOURNEY_SEARCH_PATH = "/browsing/journey/v1/orientations/journey-search"
 
 # Renfe runs two sales systems until early 2027. The new one (this API) prices journeys from this date;
-# earlier journeys are sold by the legacy shop at venta.renfe.com, which this CLI doesn't talk to yet.
+# earlier journeys are sold by the legacy shop at venta.renfe.com, which search() asks for them (legacy.py).
 NSV_FIRST_SALE_DATE = date(2027, 1, 25)
 LEGACY_SHOP_URL = "https://venta.renfe.com/vol/"
 

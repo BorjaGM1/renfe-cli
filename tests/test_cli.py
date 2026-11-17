@@ -210,7 +210,7 @@ def test_open_without_a_train_sends_no_search(fake, opened):
     out = json.loads(result.stdout)
     assert out["opened"] is True and out["train"] is None
     assert opened == [out["shop"]["url"]] and "departure-date=2026-11-20" in opened[0]
-    assert config.SEARCH_TRAVEL_PATH not in fake.paths()  # only the station list was needed
+    assert fake.requests == []  # both stations came from the shipped list; no train was asked about
 
 
 def test_open_with_a_train_checks_it_and_shows_it(fake, opened):
@@ -239,13 +239,24 @@ def test_open_no_browser_only_prints_the_link(fake, opened):
     assert out["opened"] is False and opened == [] and out["shop"]["url"]
 
 
-def test_open_before_the_cutoff_with_a_train_it_cant_see_still_opens(fake, opened):
-    """Before 25 Jan 2027 the CLI's list is incomplete, so a missing train isn't an error."""
+def test_open_before_the_cutoff_checks_the_legacy_shops_list(fake, opened):
+    result = invoke("open", "Madrid", "Barcelona", "-d", "2026-11-20", "--train", "3100", "--browser")
+    assert result.exit_code == 0, result.output
+    out = json.loads(result.stdout)
+    assert out["train"]["service"] == "03100" and out["train"]["departure"] == "2026-11-20T09:00:00+01:00"
+    assert out["notice"] is None and len(opened) == 1 and "departure-date=2026-11-20" in opened[0]
+    assert not fake.new_system_requests()
+
+
+def test_open_before_the_cutoff_when_the_legacy_shop_fails_a_train_it_cant_see_still_opens(monkeypatch, opened):
+    """Then the list is the new system's partial one, so a missing train isn't an error."""
+    handler = FakeRenfe(**{"buscarTren.do": lambda r: httpx.Response(429)})
+    monkeypatch.setattr(cli, "make_client", lambda: RsvClient(transport=httpx.MockTransport(handler), spacing=0))
     result = invoke("open", "Madrid", "Barcelona", "-d", "2026-11-20", "--train", "03141", "--browser")
     assert result.exit_code == 0, result.output
     out = json.loads(result.stdout)
     assert out["train"] is None and "look for it on Renfe's page" in out["notice"]
-    assert "can't search" not in out["notice"]  # the search's own legacy-shop notice isn't repeated here
+    assert "legacy shop" in out["notice"] and "(429)" in out["notice"] and "no fares" not in out["notice"]
     assert len(opened) == 1 and "departure-date=2026-11-20" in opened[0]
 
 
@@ -262,12 +273,12 @@ def test_open_rejects_what_isnt_a_train_number(fake, opened, train):
     assert opened == [] and config.SEARCH_TRAVEL_PATH not in fake.paths()
 
 
-@pytest.mark.parametrize("day,code", [("2027-01-24", 0), ("2027-01-25", 2)])
-def test_open_unknown_train_around_the_cutoff(fake, opened, day, code):
-    """On the legacy shop's last day the CLI's list is incomplete (a notice); from the cut-off it's an error."""
+@pytest.mark.parametrize("day,legacy", [("2027-01-24", True), ("2027-01-25", False)])
+def test_open_unknown_train_around_the_cutoff(fake, opened, day, legacy):
+    """The legacy shop's list on its last day, the new system's from the cut-off: complete either way."""
     result = invoke("open", "Madrid", "Barcelona", "-d", day, "--train", "99999", "--browser")
-    assert result.exit_code == code
-    assert len(opened) == (1 if code == 0 else 0)
+    assert result.exit_code == 2 and opened == []
+    assert bool(fake.legacy_requests()) is legacy and bool(fake.new_system_requests()) is not legacy
 
 
 def test_open_unknown_train_when_renfe_says_the_list_is_short(monkeypatch, tmp_path, opened):

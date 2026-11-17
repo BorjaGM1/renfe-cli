@@ -83,12 +83,12 @@ def test_fares_batched_by_three_and_matched():
     assert out["trains"][3]["fares"][0]["price"] == 30.0  # second batch starts again at route 0
 
 
-def test_before_cutoff_skips_fares_with_notice():
+def test_before_cutoff_the_legacy_shop_gives_every_train_and_its_fares():
     fake = FakeRenfe()
     out = run(fake, day=date(2026, 11, 21))
-    assert not bodies(fake, config.JOURNEY_SEARCH_PATH)
-    assert out["fares_included"] is False and "venta.renfe.com" in out["notice"]
-    assert all(t["fares"] is None for t in out["trains"])
+    assert not fake.new_system_requests()  # nothing asked of the new system, which prices none of them
+    assert out["fares_included"] is True and out["notice"] is None and out["count"] == 5
+    assert out["trains"][0]["fares"] and out["trains"][0]["departure"].startswith("2026-11-21T07:00")
 
 
 def test_after_and_limit():

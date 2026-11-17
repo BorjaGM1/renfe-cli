@@ -140,6 +140,7 @@ class RsvClient:
         pace_file: Path | None = None,
         session_file: Path | None = None,
     ):
+        self.transport = transport  # the legacy shop's search (legacy.py) sends through it too
         self._pacer = _Pacer(spacing, pace_file if pace_file is not None else config.cache_dir() / "pace.lock")
         self._session_file = session_file if session_file is not None else config.cache_dir() / "session.json"
         self._lock = threading.RLock()  # fare batches run in threads; one session for all of them

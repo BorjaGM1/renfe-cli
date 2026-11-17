@@ -1,4 +1,6 @@
-"""Train search: the timetable (search-travel), then fares for those trains (journey-search).
+"""Train search: the timetable (search-travel), then fares for those trains (journey-search). Before the
+cut-off, Renfe's legacy shop gives both in one search instead (legacy.py); if it fails, the new system's
+partial timetable is shown without fares.
 
 Request shapes copied from one anonymous web search (venta.rsv.renfe.com, 2026-11-15). Fares are for
 one adult with no discount card: with discounts or promos the web app adds a reCAPTCHA token, which
@@ -13,7 +15,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from . import config, shop
+from . import config, legacy, shop
 from .client import RsvClient
 from .errors import ApiShapeError, BlockedError, RenfeError
 from .stations import Station
@@ -250,27 +252,41 @@ def search(
     fares: bool = True,
     limit: int | None = None,
 ) -> dict:
-    """Trains from `origin` to `destination` on `day` (Madrid date), with fares when Renfe's new
-    system sells that date. `after` keeps trains leaving at or after that local time."""
+    """Trains from `origin` to `destination` on `day` (Madrid date), with fares for one adult. Before the
+    cut-off they come from the legacy shop; if it fails, from the new system's partial list without fares,
+    with a notice. `after` keeps trains leaving at or after that local time."""
     names = names or {}
     notices: list[str] = []
-    after_utc, before_utc = utc_window(day)
-    doc = client.post(config.SEARCH_TRAVEL_PATH, {
-        "depart_after_datetime": after_utc,
-        "depart_before_datetime": before_utc,
-        "travel_path": [{"code": origin.code}, {"code": destination.code}],
-        "direction": "OUTBOUND",
-    }, label="search-travel")
-    trains, total = _timetable(doc, names)
-    if total is not None and total > len(trains):
-        notices.append(f"Renfe reported {total} trains but returned {len(trains)}; some may be missing.")
+    sold_here = day >= config.NSV_FIRST_SALE_DATE
+    trains, legacy_failure = None, None
+    if not sold_here:  # the legacy shop sells these dates, and lists every train with its fares
+        try:
+            trains = legacy.trains(origin, destination, day, names, transport=client.transport)
+        except RenfeError as err:
+            legacy_failure = err.message
+        if trains == []:  # not trusted: an unknown station or a changed answer may look like this too
+            trains, legacy_failure = None, "it listed no trains"
+    from_legacy = trains is not None
+    if trains is None:
+        after_utc, before_utc = utc_window(day)
+        doc = client.post(config.SEARCH_TRAVEL_PATH, {
+            "depart_after_datetime": after_utc,
+            "depart_before_datetime": before_utc,
+            "travel_path": [{"code": origin.code}, {"code": destination.code}],
+            "direction": "OUTBOUND",
+        }, label="search-travel")
+        trains, total = _timetable(doc, names)
+        if total is not None and total > len(trains):
+            notices.append(f"Renfe reported {total} trains but returned {len(trains)}; some may be missing.")
     if after:
         trains = [t for t in trains if datetime.fromisoformat(t["departure"]).time() >= after]
     trains.sort(key=lambda t: t["legs"][0]["_dep_utc"])
     if limit is not None:
         trains = trains[:limit]
 
-    sold_here = day >= config.NSV_FIRST_SALE_DATE
+    if from_legacy and not fares:
+        for train in trains:
+            train.update(available=None, fares=None)
     fares_error = None
     if fares and trains and sold_here:
         batches = [trains[i:i + config.FARE_BATCH] for i in range(0, len(trains), config.FARE_BATCH)]
@@ -297,13 +313,14 @@ def search(
                            "Wait before trying again.")
         elif unpriced:
             notices.append(f"{unpriced} train(s) came back without fares.")
-    if not sold_here and trains:
+    if legacy_failure is not None:
         # Observed 2026-11-15: before the cut-off this API lists only part of the timetable. Madrid-Barcelona,
         # Fri 20 Nov 2026: 8 trains here vs 24 on the legacy shop (all 8 among them); the web never shows
         # this list (the new shop's calendar won't pick dates before the cut-off).
-        notices.append(f"Trips before {config.NSV_FIRST_SALE_DATE.isoformat()} are sold on Renfe's legacy shop "
-                       f"({config.LEGACY_SHOP_URL}), which this CLI can't search: no fares, and this list may be "
-                       "missing trains. `shop.url` opens the full list on Renfe's website.")
+        notices.append(f"Renfe's legacy shop ({config.LEGACY_SHOP_URL}), which sells trips before "
+                       f"{config.NSV_FIRST_SALE_DATE.isoformat()}, failed ({legacy_failure}), so this list is from "
+                       f"Renfe's new system: {'no fares, and ' if fares else ''}it may be missing trains. "
+                       "`shop.url` opens the full list on Renfe's website.")
 
     for train in trains:
         for leg in train["legs"]:
@@ -318,7 +335,7 @@ def search(
         "origin": origin.to_dict(),
         "destination": destination.to_dict(),
         "passengers": {"adults": 1},
-        "fares_included": bool(fares and sold_here and fares_error is None),
+        "fares_included": bool(fares and (sold_here or from_legacy) and fares_error is None),
         "notice": " ".join(notices) or None,
         "count": len(trains),
         "trains": trains,

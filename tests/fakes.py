@@ -2,7 +2,9 @@
 are public timetable data."""
 
 import base64
+import copy
 import json
+import re
 
 import httpx
 
@@ -79,12 +81,69 @@ def priced(legs_body: list[dict]) -> dict:
     return {"data": {"offer": {"product_families": FAMILIES, "travels": [{"routes": routes}]}}, "messages": []}
 
 
+# Renfe's legacy shop (venta.renfe.com/vol), which sells the dates before the cut-off. Made-up trains.
+
+
+def js(value) -> str:
+    """Python data as DWR writes it: a JavaScript object literal with bare keys, non-ASCII as \\u escapes."""
+    if isinstance(value, dict):
+        return "{" + ",".join(f"{key}:{js(item)}" for key, item in value.items()) + "}"
+    if isinstance(value, list):
+        return "[" + ",".join(js(item) for item in value) + "]"
+    return json.dumps(value)
+
+
+def legacy_leg(service, dep, arr, origin="60000", destination="71801", kind="AVE"):
+    return {"cdgoEstacionOrigenTrayecto": origin, "cdgoEstacionDestinoTrayecto": destination, "cdgoTren": service,
+            "tipoTren": kind, "horaSalida": f"{dep}:00", "horaLlegada": f"{arr}:00", "razonNoDisponible": None,
+            "lstIncidencias": [{"cdgoInc": "X", "description": "Texto libre del servidor"}]}
+
+
+def legacy_train(legs, minutes, fares=(), reason="8", **extra):
+    return {"trayectos": legs, "duracionViajeTotalEnMinutos": minutes, "razonNoDisponible": reason,
+            "completo": False, "soloPlazaH": False, "msgTrenNoDispo": "Texto libre del servidor",
+            "tarifasDisponibles": [{"titulo": name, "precioTarifa": price} for name, price in fares] or None,
+            **extra}
+
+
+LEGACY_TRAINS = [
+    legacy_train([legacy_leg("03300", "17:00", "19:45")], 165, [("Elige", "41,5"), ("Básico", "36,75")]),
+    legacy_train([legacy_leg("03100", "09:00", "11:40")], 160, [("Básico", "31,15"), ("Pr&eacute;mium", "79,8")]),
+    legacy_train([legacy_leg("00600", "07:00", "09:00", destination="04040", kind="MD"),
+                  legacy_leg("00500", "09:30", "12:00", origin="04040", kind="INTERCITY")], 300, [("Básico", "25")]),
+    legacy_train([legacy_leg("03200", "13:00", "15:50")], 170, reason="4"),  # not on sale at the moment
+    legacy_train([legacy_leg("03400", "22:30", "01:15")], 165, reason="3", completo=True),  # full
+]
+
+
+def legacy_answer(day: str, rows) -> str:
+    """getTrainsList's answer, every leg dated `day` (YYYY-MM-DD) unless it says otherwise."""
+    rows = copy.deepcopy(rows)
+    for row in rows:
+        for leg in row["trayectos"]:
+            leg.setdefault("fecha", day)
+    doc = {"actEtiqOferta": "SI", "listadoTrenes": [
+        {"cdgoError": None, "hayError": False, "listviajeViewEnlaceBean": rows, "viajeIda": True}]}
+    return f'r.handleCallback("1","0",{js(doc)});'
+
+
+def dwr_response(call: str) -> httpx.Response:
+    """A DWR reply carrying `call`, wrapped as the shop wraps it."""
+    text = (f"throw 'allowScriptTagRemoting is false.';\n(function(){{\nvar r=window.dwr._[0];\n//#DWR-INSERT\n"
+            f"//#DWR-REPLY\n{call}\n}})();\n")
+    return httpx.Response(200, headers={"content-type": "text/javascript; charset=utf-8"}, text=text)
+
+
+LEGACY_SESSION = "FAKEDWRSESSION0001"
+
+
 class FakeRenfe:
     """Routes requests by URL; records them for assertions."""
 
-    def __init__(self, **overrides):
+    def __init__(self, legacy_trains=None, **overrides):
         self.requests: list[httpx.Request] = []
         self.overrides = overrides  # url-path -> callable(request) -> httpx.Response
+        self.legacy_trains = LEGACY_TRAINS if legacy_trains is None else legacy_trains
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -103,7 +162,30 @@ class FakeRenfe:
         if url.endswith(config.JOURNEY_SEARCH_PATH):
             body = json.loads(request.content)
             return httpx.Response(200, json=priced(body["travels"][0]["routes"]))
+        if request.url.host == "venta.renfe.com":
+            return self.legacy(request)
         return httpx.Response(404, json={"codeError": "NOT_FOUND"})
+
+    def legacy(self, request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/vol/buscarTren.do":
+            return httpx.Response(302, headers={"location": "https://venta.renfe.com/vol/buscarTrenEnlaces.do",
+                                                "set-cookie": "JSESSIONID=fake0001; Path=/vol"})
+        if path == "/vol/buscarTrenEnlaces.do":
+            return httpx.Response(200, headers={"content-type": "text/html;charset=ISO-8859-1"},
+                                  text="<script src='/vol/dwr/interface/trainEnlacesManager.js?v=6'></script>")
+        if path.endswith("/__System.generateId.dwr"):
+            return dwr_response(f'r.handleCallback("0","0","{LEGACY_SESSION}");')
+        if path.endswith("/trainEnlacesManager.getTrainsList.dwr"):
+            day, month, year = re.search(r"c0-e3=string:(\d\d)%2F(\d\d)%2F(\d{4})", request.content.decode()).groups()
+            return dwr_response(legacy_answer(f"{year}-{month}-{day}", self.legacy_trains))
+        return httpx.Response(404, text="")
 
     def paths(self) -> list[str]:
         return [request.url.path for request in self.requests]
+
+    def legacy_requests(self) -> list[httpx.Request]:
+        return [request for request in self.requests if request.url.host == "venta.renfe.com"]
+
+    def new_system_requests(self) -> list[httpx.Request]:
+        return [request for request in self.requests if request.url.host == "api.rsv.renfe.com"]
