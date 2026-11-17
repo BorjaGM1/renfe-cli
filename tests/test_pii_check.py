@@ -450,6 +450,13 @@ def test_maintainer_handle_words_only_count_in_pairs(pc):
     assert tokens["p:lucia gonzalez"] == "name" and tokens["p:gonzalez lucia"] == "name"
 
 
+def test_an_email_whose_local_part_is_the_maintainer_handle_counts_only_in_full(pc):
+    """The handle is in the repo's URL and noreply address, so it can't be a needle on its own."""
+    handle = pc.MAINTAINER
+    assert pc.needle_tokens([("email", f"{handle}@example.org")]) == {f"e:{handle}@example.org": "email"}
+    assert pc.needle_tokens([("email", "anaejemplo@example.org")])["w:anaejemplo"] == "email"
+
+
 def test_place_name_words_only_count_in_pairs(pc):
     tokens = pc.needle_tokens([("name", "María Toledo Ejemplo")])
     assert "w:maria" not in tokens and "w:toledo" not in tokens and "w:ejemplo" in tokens

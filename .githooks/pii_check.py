@@ -794,7 +794,9 @@ def value_tokens(kind: str, value: str) -> dict[str, str]:
     elif kind == "email":
         tokens["e:" + value.lower()] = "email"
         local = fold(value.split("@", 1)[0])
-        if len(local) >= 6 and local.isalpha():
+        # The local part alone also counts, unless it is the maintainer's public handle (it's in the repo's
+        # URL and noreply address, so it can't be kept out of git): then only the full address does.
+        if len(local) >= 6 and local.isalpha() and local != fold(MAINTAINER):
             tokens["w:" + local] = "email"
     elif kind == "name":
         words = [w for w in WORD.findall(fold(value)) if w not in STOPWORDS and w.isalpha()]
