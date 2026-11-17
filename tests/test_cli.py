@@ -9,7 +9,7 @@ from typer.testing import CliRunner
 from renfe import cli, config
 from renfe.client import RsvClient
 
-from fakes import FakeRenfe
+from fakes import STATIONS, FakeRenfe
 
 runner = CliRunner()
 
@@ -47,6 +47,7 @@ def test_search_outputs_json(fake):
     out = json.loads(result.stdout)
     assert out["origin"]["code"] == "MADRI" and out["destination"]["code"] == "BARCE"
     assert out["count"] == 2 and out["trains"][0]["fares"]
+    assert config.STATIONS_PATH not in fake.paths()  # both stations came from the shipped list
 
 
 def test_search_no_fares(fake):
@@ -73,7 +74,7 @@ def test_blocked_exit_code(monkeypatch, tmp_path):
     monkeypatch.setenv(config.CACHE_ENV, str(tmp_path))
     handler = FakeRenfe(**{"stations": lambda r: httpx.Response(429, json={}, headers={"retry-after": "30"})})
     monkeypatch.setattr(cli, "make_client", lambda: RsvClient(transport=httpx.MockTransport(handler), spacing=0))
-    result = invoke("stations", "madrid")
+    result = invoke("stations", "Narnia")  # not in the shipped list, so Renfe is asked
     assert result.exit_code == 5
     err = json.loads(result.stderr)["error"]
     assert err["type"] == "blocked" and "retry after 30" in err["message"]
@@ -84,7 +85,7 @@ def test_unexpected_exception_reports_type_only(monkeypatch):
         raise RuntimeError("Bearer secret-token-value")
 
     monkeypatch.setattr(cli, "make_client", broken)
-    result = invoke("stations")
+    result = invoke("search", "Madrid", "Barcelona", "-d", "2027-01-29")
     assert result.exit_code == 1
     assert "secret-token-value" not in result.stderr and "RuntimeError" in result.stderr
 
@@ -94,6 +95,26 @@ def test_stations(fake):
     assert result.exit_code == 0
     out = json.loads(result.stdout)
     assert [s["code"] for s in out["stations"]] == ["MADRI", "60000"]
+    assert fake.paths() == []  # the shipped list answered: no request at all
+
+
+def test_stations_asks_renfe_only_when_the_shipped_list_has_no_match(fake):
+    out = json.loads(invoke("stations", "apeadero").stdout)
+    assert [s["code"] for s in out["stations"]] == ["99001"]
+    assert fake.paths().count(config.STATIONS_PATH) == 1
+    assert json.loads(invoke("stations", "Narnia").stdout)["count"] == 0  # nowhere: an empty list, exit 0
+
+
+def test_stations_refresh_uses_renfe_live_list(fake):
+    out = json.loads(invoke("stations", "--refresh", "--limit", "50").stdout)
+    assert out["count"] == len(STATIONS) and fake.paths().count(config.STATIONS_PATH) == 1
+
+
+def test_search_takes_a_station_only_renfe_knows(fake):
+    result = invoke("search", "Apeadero Nuevo", "Barcelona", "-d", "2027-01-29", "--no-fares")
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["origin"]["code"] == "99001"
+    assert fake.paths().count(config.STATIONS_PATH) == 1
 
 
 def test_version():

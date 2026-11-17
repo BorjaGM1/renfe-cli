@@ -1,0 +1,41 @@
+# Twice a year, open an issue to refresh the station list shipped with the CLI (src/renfe/data/stations.json).
+# A station missing from it still works (the CLI then asks Renfe for its live list); it only costs a request.
+# GitHub turns scheduled workflows off after 60 days without activity in a public repo; re-enable this one
+# from the Actions tab if that happens, or run it by hand there.
+name: Station list reminder
+
+on:
+  schedule:
+    - cron: "0 8 1 2,8 *"  # 1 February and 1 August, 08:00 UTC
+  workflow_dispatch:
+
+permissions:
+  issues: write
+
+jobs:
+  remind:
+    if: github.repository == 'luisgonzaleznf/renfe-cli'  # not in copies or forks
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Open the issue unless one is already open
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TITLE: Refresh the shipped station list
+        run: |
+          open=$(gh issue list --state open --limit 200 --json title --jq '[.[] | select(.title == env.TITLE)] | length')
+          if [ "$open" != "0" ]; then
+            echo "An issue titled '$TITLE' is already open."
+            exit 0
+          fi
+          gh issue create --title "$TITLE" --body-file - <<'BODY'
+          The CLI ships Renfe's station list, so a lookup needs no request. Renfe opens, closes and renames
+          stations now and then; refresh the list:
+
+          - [ ] `uv run python scripts/update_stations.py` (prints the stations added, removed or renamed)
+          - [ ] `uv run pytest`
+          - [ ] Open a PR with the printed changes, or close this issue if nothing changed.
+
+          Opened by `.github/workflows/stations-reminder.yml`.
+          BODY

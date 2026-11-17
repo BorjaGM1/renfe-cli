@@ -118,17 +118,34 @@ def _root(
 def stations_cmd(
     query: Annotated[str | None, typer.Argument(help="Part of a station name, or a code.")] = None,
     limit: Annotated[int, typer.Option(min=1, max=2000, help="Most results to show.")] = 20,
-    refresh: Annotated[bool, typer.Option(help="Refetch the station list instead of using the day-old cache.")] = False,
+    refresh: Annotated[bool, typer.Option(
+        help="Ask Renfe for its current list instead of using the one shipped with the CLI.")] = False,
 ) -> None:
     """List stations matching QUERY (all of them without one), best match first."""
 
+    def pick(every: list[stations_mod.Station]) -> list[stations_mod.Station]:
+        return stations_mod.find(query, every, limit) if query else every[:limit]
+
     def produce() -> dict:
-        with make_client() as client:
-            every = stations_mod.load(client, refresh=refresh)
-        found = stations_mod.find(query, every, limit) if query else every[:limit]
+        found = [] if refresh else pick(stations_mod.bundled())
+        if not found:  # asked to, or nothing in the shipped list matches: Renfe's live list
+            with make_client() as client:
+                found = pick(stations_mod.load(client, refresh=refresh))
         return {"query": query, "count": len(found), "stations": [s.to_dict() for s in found]}
 
     _emit(produce)
+
+
+def _stations(client: RsvClient, origin: str, destination: str) -> tuple[stations_mod.Station, stations_mod.Station]:
+    src, dst = stations_mod.lookup(origin, client), stations_mod.lookup(destination, client)
+    if src.code == dst.code:
+        raise UsageError("origin and destination are the same station")
+    return src, dst
+
+
+def _names(*picked: stations_mod.Station) -> dict[str, str]:
+    """Station names by code, for the legs of a search; a code the shipped list lacks keeps no name."""
+    return {s.code: s.name for s in stations_mod.bundled()} | {s.code: s.name for s in picked}
 
 
 @app.command("search")
@@ -150,12 +167,9 @@ def search_cmd(
         if hide_departed:  # don't list trains that have already left
             after_time = now.time().replace(second=0, microsecond=0)
         with make_client() as client:
-            every = stations_mod.load(client)
-            src, dst = stations_mod.resolve(origin, every), stations_mod.resolve(destination, every)
-            if src.code == dst.code:
-                raise UsageError("origin and destination are the same station")
-            names = {s.code: s.name for s in every}
-            out = search_mod.search(client, src, dst, day, names=names, after=after_time, fares=fares, limit=limit)
+            src, dst = _stations(client, origin, destination)
+            out = search_mod.search(client, src, dst, day, names=_names(src, dst), after=after_time, fares=fares,
+                                    limit=limit)
         if hide_departed and out["count"] == 0:
             gone = f"No more trains today after {after_time.strftime('%H:%M')}; try --date tomorrow."
             out["notice"] = f"{out['notice']} {gone}" if out["notice"] else gone
@@ -197,14 +211,10 @@ def open_cmd(
         if train is not None and wanted is None:
             raise UsageError(f"--train must be a train number such as 03081 or 00601+00533 (got {train!r})")
         with make_client() as client:
-            every = stations_mod.load(client)
-            src, dst = stations_mod.resolve(origin, every), stations_mod.resolve(destination, every)
-            if src.code == dst.code:
-                raise UsageError("origin and destination are the same station")
+            src, dst = _stations(client, origin, destination)
             chosen, notices = None, []
             if wanted is not None:
-                names = {s.code: s.name for s in every}
-                found = search_mod.search(client, src, dst, day, names=names, fares=False)
+                found = search_mod.search(client, src, dst, day, names=_names(src, dst), fares=False)
                 chosen = next((t for t in found["trains"] if _service_parts(t["service"]) == wanted), None)
                 sold_here = day >= config.NSV_FIRST_SALE_DATE
                 if found["notice"] and sold_here:  # e.g. Renfe reported more trains than it returned

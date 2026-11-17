@@ -19,7 +19,8 @@ def jwt(claims: dict) -> str:
 
 TOKEN = jwt({"custom:terminal_id": TERMINAL, "token_use": "access"})
 
-STATIONS = [
+# The list the tests treat as shipped with the CLI (conftest swaps it in for the real one).
+SHIPPED = [
     {"_u_i_c_station_code": "MADRI", "name": "Madrid (Todas)", "province": "Madrid",
      "agglomeration_type": "geographical", "main_station": False},
     {"_u_i_c_station_code": "60000", "name": "Madrid-Puerta de Atocha-Almudena Grandes", "province": "Madrid",
@@ -33,6 +34,9 @@ STATIONS = [
     {"_u_i_c_station_code": "04040", "name": "Zaragoza-Delicias", "province": "Zaragoza",
      "agglomeration_type": "commercial", "main_station": True},
 ]
+# A station opened after the shipped list was made: only Renfe's live list has it.
+NEW_STATION = {"_u_i_c_station_code": "99001", "name": "Apeadero Nuevo", "province": "Soria"}
+STATIONS = SHIPPED + [NEW_STATION]  # what the fake Renfe answers for its station list
 
 
 def path(service, dep, arr, origin="60000", destination="71801"):

@@ -58,8 +58,11 @@ sells. From 25 Jan 2027 the CLI's list matches the website's exactly, trains and
 (checked against the web for Friday 29 Jan: 22 trains each).
 
 Stations are matched by name, ignoring accents and case, or by code. A city name such as `Madrid` means
-all of that city's stations (`MADRI`). The station list is cached for a day in the cache folder:
-`~/.cache/renfe-cli`, or `$XDG_CACHE_HOME/renfe-cli`, or `$RENFE_CACHE_DIR` if set.
+all of that city's stations (`MADRI`). Renfe's list of about 1,400 stations ships with the CLI, so
+finding one sends no request. Only a name that matches none of them makes the CLI ask Renfe for its
+current list, in case the station is newer than the shipped one; that list is kept for a day.
+`renfe stations --refresh` asks Renfe directly. The cache folder is `~/.cache/renfe-cli`, or
+`$XDG_CACHE_HOME/renfe-cli`, or `$RENFE_CACHE_DIR` if set.
 
 ## Output and errors
 
@@ -80,7 +83,12 @@ stdout is JSON. Errors go to stderr as `{"error": {...}}`, with these exit codes
 uv sync
 uv run pytest                      # offline: HTTP is mocked
 RENFE_LIVE=1 uv run pytest -m live # about 5 real requests
+uv run python scripts/update_stations.py  # refresh the shipped station list; prints what changed
 ```
+
+A scheduled workflow (`.github/workflows/stations-reminder.yml`) opens an issue to refresh the station
+list on 1 February and 1 August. GitHub turns schedules off in a public repo after 60 days without
+activity; re-enable it from the Actions tab, or run it from there by hand.
 
 Personal-data guard: `.githooks/` checks staged changes and commit messages for passengers' and
 buyers' data (names, DNI/NIE, emails, phones, booking locators, card numbers) and for capture files.
