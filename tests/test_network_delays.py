@@ -48,8 +48,8 @@ def install(monkeypatch, board, archive=b"", **overrides):
     return fake
 
 
-def run():
-    result = CliRunner().invoke(cli.app, ["delays"])
+def run(*args):
+    result = CliRunner().invoke(cli.app, ["delays", *args])
     assert result.exit_code == 0, result.stderr or result.exception
     return json.loads(result.stdout)
 
@@ -189,3 +189,140 @@ def test_only_timetable_is_cached_and_damaged_or_expired_cache_is_refetched(monk
     assert [str(r.url) for r in fake.requests] == [
         config.LIVE_MAP_URL, delays.TIMETABLE_URL, config.LIVE_MAP_URL, config.LIVE_MAP_URL, delays.TIMETABLE_URL,
     ]
+
+
+def ticket_routes():
+    trips = "daily,00632,whole\ndaily,37632,middle\ndaily,37432,last"
+    stops = "\n".join(("whole,1,04040,,08:00:00", "whole,2,11200,08:59:00,09:00:00",
+                       "whole,3,10600,10:00:00,10:02:00", "whole,4,30100,12:00:00,",
+                       route("middle", "09:00:00", "10:00:00", "11200", "10600"),
+                       route("last", "10:02:00", "12:00:00", "10600", "30100")))
+    return trips, stops
+
+
+def test_live_and_ticket_numbers_find_the_same_row_with_verified_sections(monkeypatch):
+    trips, stops = ticket_routes()
+    board = live_map(train("00632", origin="04040", destination="30100"), train("11111", delay=5))
+    fake = install(monkeypatch, board, timetable(trips, stops))
+    row = run()["trains"][0]
+    assert row["train"] == "00632" and row["schedule_match"] == "exact"
+    assert [(s["train"], s["origin"]["code"], s["destination"]["code"],
+             s["scheduled_departure"][11:16], s["scheduled_arrival"][11:16]) for s in row["number_segments"]] == [
+        ("00632", "04040", "30100", "08:00", "12:00"), ("37632", "11200", "10600", "09:00", "10:00"),
+        ("37432", "10600", "30100", "10:02", "12:00")]
+    assert row["number_segments"][0]["origin"]["name"] == row["origin"]["name"]
+    for number in ("632", "37432", "37632"):
+        filtered = run(number)
+        assert filtered["requested_train"] == number.zfill(5)
+        assert (filtered["mapped_trains"], filtered["delayed"], filtered["matched_trains"]) == (2, 2, 1)
+        assert filtered["trains"] == [row]
+    assert len([r for r in fake.requests if str(r.url) == delays.TIMETABLE_URL]) == 1
+    assert run("11111")["trains"][0]["number_segments"] == []  # Direct live number with no timetable.
+
+
+@pytest.mark.parametrize("number,service,src,dst,dep,arr", [
+    ("11111", "daily", "10600", "30100", "10:02:00", "12:00:00"),  # identical trip, outside published group
+    ("37432", "offday", "10600", "30100", "10:02:00", "12:00:00"),
+    ("37432", "daily", "10600", "30100", "10:03:00", "12:00:00"),
+    ("37432", "daily", "30100", "10600", "10:02:00", "12:00:00"),
+    ("37432", "daily", "10600", "71801", "10:02:00", "12:00:00"),  # only one shared station
+])
+def test_ticket_numbers_need_a_published_group_and_dated_timed_movement(monkeypatch, number, service, src, dst, dep, arr):
+    _, whole_and_peers = ticket_routes()
+    trips = f"daily,00632,whole\n{service},{number},candidate"
+    stops = whole_and_peers + "\n" + route("candidate", dep, arr, src, dst)
+    install(monkeypatch, live_map(train("00632", origin="04040", destination="30100")), timetable(trips, stops))
+    assert [s["train"] for s in run()["trains"][0]["number_segments"]] == ["00632"]
+    assert run(number)["trains"] == []
+
+
+def test_multiple_stop_patterns_only_confirm_the_common_part(monkeypatch):
+    # Identical endpoint times. One possible live trip uses a different station after Valladolid.
+    trips, stops = ticket_routes()
+    trips += "\ndaily,00632,other\ndaily,37432,long"
+    stops += "\n" + "\n".join(("other,1,04040,,08:00:00", "other,2,11200,08:59:00,09:00:00",
+                               "other,3,10600,10:00:00,10:02:00", "other,4,77777,11:00:00,11:02:00",
+                               "other,5,30100,12:00:00,", "long,1,11200,,09:00:00",
+                               "long,2,10600,10:00:00,10:02:00", "long,3,30100,12:00:00,"))
+    install(monkeypatch, live_map(train("00632", origin="04040", destination="30100")), timetable(trips, stops))
+    row, = run("37432")["trains"]
+    assert [(s["origin"]["code"], s["destination"]["code"]) for s in row["number_segments"]
+            if s["train"] == "37432"] == [("11200", "10600")]
+
+
+def test_through_journey_requires_the_published_endpoints_and_all_legs(monkeypatch):
+    trips = "daily,37632,one\ndaily,37432,two\ndaily,00632,three"
+    legs = [route("one", "08:00:00", "09:00:00", "04040", "11200"),
+            route("two", "09:10:00", "10:00:00", "11200", "10600"),
+            route("three", "10:05:00", "12:00:00", "10600", "30100")]
+    fake = install(monkeypatch, live_map(train("00632", origin="04040", destination="30100")),
+                   timetable(trips, "\n".join(legs)))
+    row, = run("37432")["trains"]
+    assert row["schedule_match"] == "linked" and row["schedule_trains"] == ["37632", "37432", "00632"]
+    # A valid change at Valladolid alone doesn't establish a different through journey.
+    fake.live = live_map(train("00632", origin="11200", destination="30100"))
+    assert run()["trains"][0]["schedule_match"] == "unmatched"
+
+
+def test_ticket_lookup_uses_the_service_day_for_an_overnight_section(monkeypatch):
+    trips = "night,00632,whole\nnight,37432,prior\ntoday,37632,today"
+    stops = "\n".join(("whole,1,04040,,23:00:00", "whole,2,10600,24:05:00,24:10:00", "whole,3,30100,25:00:00,",
+                       route("prior", "24:10:00", "25:00:00", "10600", "30100"),
+                       route("today", "00:10:00", "01:00:00", "10600", "30100")))
+    seen = "2027-01-30T00:45:00"
+    install(monkeypatch, live_map(train("00632", origin="04040", destination="30100", expected=seen, reported=seen),
+                                  updated=seen), timetable(trips, stops, exceptions="night,20270129,1\ntoday,20270130,1"))
+    row, = run("37432")["trains"]
+    assert row["number_segments"][-1]["scheduled_departure"] == "2027-01-30T00:10:00+01:00"
+    assert run("37632")["matched_trains"] == 0
+
+
+def test_ticket_number_status_also_finds_an_on_time_train(monkeypatch):
+    trips, stops = ticket_routes()
+    fake = install(monkeypatch, live_map(train("00632", delay=0, origin="04040", destination="30100")),
+                   timetable(trips, stops))
+    runner = CliRunner()
+    direct = json.loads(runner.invoke(cli.app, ["status", "632"]).stdout)
+    assert direct["train"] == "00632" and len(fake.requests) == 1
+    status = json.loads(runner.invoke(cli.app, ["status", "37432"]).stdout)
+    assert status["on_map"] and status["train"] == "00632" and status["requested_train"] == "37432"
+    assert status["delay_minutes"] == 0 and len(fake.requests) == 3
+    assert run("37432")["trains"] == []
+
+
+def test_ticket_number_matching_multiple_live_trains_keeps_both(monkeypatch):
+    trips, stops = ticket_routes()
+    trips += "\ndaily,37632,shared"
+    stops += "\n" + route("shared", "10:02:00", "12:00:00", "10600", "30100")
+    install(monkeypatch, live_map(train("00632", origin="04040", destination="30100"),
+                                  train("37632", origin="10600", destination="30100")), timetable(trips, stops))
+    assert [row["train"] for row in run("37432")["trains"]] == ["00632", "37632"]
+    result = CliRunner().invoke(cli.app, ["status", "37432"])
+    out = json.loads(result.stdout)
+    assert result.exit_code == 0 and out["matching_trains"] == ["00632", "37632"]
+    assert out["delay_minutes"] is None
+
+
+def test_invalid_filter_rejected_before_loading_the_map(monkeypatch):
+    fake = install(monkeypatch, live_map())
+    result = CliRunner().invoke(cli.app, ["delays", "00632+37432"])
+    assert result.exit_code == 2 and not fake.requests
+
+
+def test_groups_with_a_common_number_are_not_transitive(monkeypatch):
+    # Renfe groups 37757 with 00757 and 00757 with 00613 on separate journeys.
+    trips = "daily,37757,live\ndaily,00613,separate"
+    install(monkeypatch, live_map(train("37757")), timetable(trips, route("live") + "\n" + route("separate")))
+    assert [s["train"] for s in run()["trains"][0]["number_segments"]] == ["37757"]
+    assert run("613")["matched_trains"] == 0
+
+
+def test_timetable_failure_keeps_direct_results_and_explains_missing_ticket_lookup(monkeypatch):
+    install(monkeypatch, live_map(train("00632", origin="04040", destination="30100")), archive=b"invalid")
+    direct, = run("632")["trains"]
+    assert direct["delay_minutes"] == 12 and direct["number_segments"] == []
+    filtered = run("37432")
+    assert filtered["matched_trains"] == 0 and filtered["notice"]
+    status = CliRunner().invoke(cli.app, ["status", "37432"])
+    out = json.loads(status.stdout)
+    assert status.exit_code == 0 and out["delay_minutes"] is None and "lookup unavailable" in out["notice"]

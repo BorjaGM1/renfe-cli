@@ -8,38 +8,17 @@ import zipfile
 import zlib
 from collections import defaultdict
 from collections.abc import Iterator
-from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 
 import httpx
 
-from . import cachefile, config, live, retry
+from . import cachefile, config, live, retry, train_numbers
 from .errors import ApiShapeError, RenfeError, UpstreamError
+from .train_numbers import Stop, Trips
 
 TIMETABLE_URL = "https://ssl.renfe.com/gtransit/Fichero_AV_LD/google_transit.zip"
 _ONE_DAY = timedelta(days=1)
-# An entry can appear before its train leaves, or linger after its scheduled arrival.
-_RUN_MARGIN = timedelta(hours=1)
-_MAX_JOIN = timedelta(hours=1)
 _WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
-# Renfe publishes these services under two numbers (see the service-number list linked in the README).
-# (live number, origin, destination) -> (first leg's number, junction); the onward leg uses the live number.
-_LINKS = {
-    ("4176", "13200", "17000"): ("04366", "11200"),
-    ("1181", "04307", "60911"): ("34182", "71801"),
-}
-
-
-@dataclass(frozen=True)
-class Stop:
-    sequence: int
-    code: str
-    arrival: timedelta | None
-    departure: timedelta | None
-
-
-type Trips = dict[tuple[date, str], list[list[Stop]]]
-type Times = tuple[timedelta, timedelta]
 
 
 def _rows(archive: zipfile.ZipFile, table: str, required: str) -> Iterator[dict[str, str]]:
@@ -147,77 +126,24 @@ def _timetable(days: set[date], numbers: set[str], transport: httpx.BaseTranspor
     return trips
 
 
-def _legs(trips: Trips, day: date, number: str, origin: str, destination: str) -> set[Times]:
-    """All distinct timings between the two stops in the requested direction on this service."""
-    times = set()
-    for route in trips.get((day, number), ()):
-        departures = []
-        for stop in route:
-            if stop.code == destination and stop.arrival is not None:
-                times.update((start, stop.arrival) for start in departures if start < stop.arrival)
-            if stop.code == origin and stop.departure is not None:
-                departures.append(stop.departure)
-    return times
-
-
-def _service_days(reference: datetime) -> set[date]:
-    # A trip can run past midnight or already appear on the map before a midnight departure.
-    return {reference.date() - _ONE_DAY, reference.date(), (reference + _RUN_MARGIN).date()}
-
-
-def _plausible(times: set[Times], day: date, reference: datetime) -> set[tuple[datetime, datetime]]:
-    midnight = datetime.combine(day, datetime.min.time(), live.MADRID)
-    offset = reference - midnight
-    return {(midnight + start, midnight + end) for start, end in times
-            if start - _RUN_MARGIN <= offset <= end + _RUN_MARGIN}
-
-
-def _schedule(trips: Trips, entry: dict, reference: datetime) -> dict:
-    number, origin, dest = live.key(entry["number"]), entry["origin"], entry["destination"]
-    link = _LINKS.get((number, origin, dest))
-    direct, linked = set(), set()
-    for day in _service_days(reference):
-        direct.update(_plausible(_legs(trips, day, number, origin, dest), day, reference))
-        if link:
-            feeder, junction = link
-            first = _legs(trips, day, live.key(feeder), origin, junction)
-            last = _legs(trips, day, number, junction, dest)
-            through = {(dep, arr) for dep, at in first for onward, arr in last
-                       if timedelta(0) <= onward - at <= _MAX_JOIN}
-            linked.update(_plausible(through, day, reference))
-    matches = direct or linked
-    if len(matches) != 1:
-        return {"schedule_match": "ambiguous" if matches else "unmatched"}
-    (dep, arr), = matches
-    result = {"schedule_match": "exact" if direct else "linked",
-              "scheduled_departure": dep.isoformat(), "scheduled_arrival": arr.isoformat()}
-    if not direct and link:
-        result["schedule_trains"] = [link[0], entry["number"]]
-    return result
-
-
-def report(board: live.Board, names: dict[str, str], *, transport: httpx.BaseTransport | None = None,
-           retries: list[dict] | None = None) -> dict:
-    entries = sorted((e for e in board.trains.values() if (e["delay"] or 0) > 0),
-                     key=lambda e: (-e["delay"], int(e["number"])))
+def _scheduled_rows(board: live.Board, entries: list[dict], names: dict[str, str],
+                    transport: httpx.BaseTransport | None, retries: list[dict]) -> tuple[list[dict], str | None]:
     rows, references = [], {}
-    retries = [] if retries is None else retries
     for entry in entries:
         number = entry["number"]
         row = live.status(board, number, names)
         del row["retries"]  # All trains share the requests logged at the top level.
-        row.update(scheduled_departure=None, scheduled_arrival=None, schedule_match="unmatched")
+        row.update(scheduled_departure=None, scheduled_arrival=None, schedule_match="unmatched", number_segments=[])
         rows.append(row)
         # The map has no service date. Undo the delay at the next stop to place the train in its
         # timetable window, including yesterday's late or overnight service.
         moment = entry["expected"] or board.updated or entry["reported_at"]
-        if moment is not None:
+        if moment is not None and entry["delay"] is not None:
             references[number] = moment.astimezone(live.MADRID) - timedelta(minutes=entry["delay"])
     notice = None
     if references:
-        days = {day for moment in references.values() for day in _service_days(moment)}
-        numbers = {live.key(n) for n in references}
-        numbers.update(live.key(feeder) for (n, _, _), (feeder, _) in _LINKS.items() if n in numbers)
+        days = {day for moment in references.values() for day in train_numbers.service_days(moment)}
+        numbers = train_numbers.timetable_numbers({live.key(n) for n in references})
         try:
             trips = _timetable(days, numbers, transport, retries)
         except RenfeError as err:
@@ -227,9 +153,53 @@ def report(board: live.Board, names: dict[str, str], *, transport: httpx.BaseTra
         else:
             for row, entry in zip(rows, entries):
                 if reference := references.get(row["train"]):
-                    row.update(_schedule(trips, entry, reference))
+                    row.update(train_numbers.match(trips, entry, reference, names))
+    return rows, notice
+
+
+def _matches(row: dict, wanted: str) -> bool:
+    return live.key(row["train"]) == wanted or any(live.key(s["train"]) == wanted for s in row["number_segments"])
+
+
+def status(board: live.Board, number: str, names: dict[str, str], *, transport: httpx.BaseTransport | None,
+           retries: list[dict]) -> dict:
+    result = live.status(board, number, names, retries)
+    if result["on_map"]:
+        return result
+    wanted = live.key(number)
+    candidates = train_numbers.timetable_numbers({wanted})
+    entries = [e for key, e in board.trains.items() if key in candidates]
+    rows, notice = _scheduled_rows(board, entries, names, transport, retries)
+    matches = [r for r in rows if _matches(r, wanted)]
+    if len(matches) == 1:
+        return {**matches[0], "requested_train": wanted.zfill(5), "retries": retries}
+    if matches:
+        result["matching_trains"] = sorted(r["train"] for r in matches)
+        result["notice"] = "Several live trains use this ticket number on a verified section. Check their routes."
+    elif notice:
+        result["notice"] += f" Ticket-number lookup unavailable. {notice}"
+    result["retries"] = retries
+    return result
+
+
+def report(board: live.Board, names: dict[str, str], *, transport: httpx.BaseTransport | None = None,
+           retries: list[dict] | None = None, train: str | None = None) -> dict:
+    retries = [] if retries is None else retries
     delays = [e["delay"] for e in board.trains.values()]
-    return {"map_updated": board.updated.isoformat() if board.updated else None,
-            "mapped_trains": len(delays), "delayed": len(rows), "on_time": delays.count(0),
-            "early": sum(d is not None and d < 0 for d in delays), "unknown": delays.count(None),
-            "trains": rows, "notice": notice, "retries": retries}
+    entries = sorted((e for e in board.trains.values() if (e["delay"] or 0) > 0),
+                     key=lambda e: (-e["delay"], int(e["number"])))
+    count = len(entries)
+    if train is not None:
+        wanted = live.key(train)
+        candidates = train_numbers.timetable_numbers({wanted})
+        entries = [e for e in entries if live.key(e["number"]) in candidates]
+    rows, notice = _scheduled_rows(board, entries, names, transport, retries)
+    result = {"map_updated": board.updated.isoformat() if board.updated else None,
+              "mapped_trains": len(delays), "delayed": count, "on_time": delays.count(0),
+              "early": sum(d is not None and d < 0 for d in delays), "unknown": delays.count(None),
+              "trains": rows, "notice": notice, "retries": retries}
+    if train is not None:
+        result["requested_train"] = wanted.zfill(5)
+        result["trains"] = [row for row in rows if _matches(row, wanted)]
+        result["matched_trains"] = len(result["trains"])
+    return result
