@@ -67,7 +67,14 @@ Keep that window open as PayPal returns you to Renfe.
 
 The command also accepts `--method card`, `bizum`, `google-pay` or `renfe-points` when Renfe offers
 that option. The capture covers method selection for these alternatives and the complete return for
-PayPal. For Apple Pay, open the search in Safari with `renfe open`. Renfe hides that option in Chrome.
+PayPal.
+
+For Apple Pay on macOS, run `uv run renfe checkout Madrid Barcelona -d tomorrow --method apple-pay`.
+The CLI opens the route and date in Safari, including when another browser is your default. Choose one
+way, select your fare and choose Apple Pay at payment. The command returns `status: handed_off` when
+Safari opens the link. Follow the outcome in Safari. This path needs no checkout extra. The automated
+price review and receipt checks run only in Chrome, so Apple Pay rejects `--review-only` before opening
+a browser.
 
 A review prints JSON with `status: reviewed`, `selected_method` and the displayed `total`. For a purchase,
 save your ticket and close the checkout window to finish the command. It reports `confirmed` when Renfe

@@ -339,12 +339,12 @@ def checkout_cmd(
     origin: Annotated[str, typer.Argument(help="Departure station or code.")],
     destination: Annotated[str, typer.Argument(help="Arrival station or code.")],
     date_: Annotated[str, typer.Option("--date", "-d", help="Travel date.")] = "today",
-    train: Annotated[str | None, typer.Option("--train", "-t", help="Expand this train to choose its fare.")] = None,
+    train: Annotated[str | None, typer.Option("--train", "-t", help="Expand this train in Chrome or show its number for manual selection in Safari.")] = None,
     method: Annotated[checkout_mod.Method, typer.Option(
         help="Payment method to select on Renfe.")] = checkout_mod.Method.paypal,
     review_only: Annotated[bool, typer.Option(help="Stop after selecting the method, before payment.")] = False,
 ) -> None:
-    """Start a one-way guest checkout in Chrome. Review the total and authorize payment in the browser."""
+    """Start a one-way guest checkout in Chrome, or open Safari for Apple Pay on macOS."""
     def produce() -> dict:
         day = _parse_date(date_)
         if day >= config.NSV_FIRST_SALE_DATE:

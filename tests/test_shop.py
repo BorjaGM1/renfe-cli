@@ -58,3 +58,16 @@ def test_the_no_browser_guard_is_never_swallowed():
     """conftest's guard must fail any test that reaches the real webbrowser.open."""
     with pytest.raises(AssertionError, match="real browser"):
         shop.open_in_browser("https://example.com/")
+
+
+def test_open_safari_explicitly_uses_the_macos_bundle(monkeypatch):
+    from types import SimpleNamespace
+
+    called = []
+    monkeypatch.setattr(shop.sys, "platform", "darwin")
+    monkeypatch.setattr(shop.subprocess, "run", lambda args, **kw: called.append(args) or SimpleNamespace(returncode=0))
+    assert shop.open_in_safari("https://example.test/")
+    assert called == [["/usr/bin/open", "-b", "com.apple.Safari", "https://example.test/"]]
+    monkeypatch.setattr(shop.sys, "platform", "linux")
+    assert not shop.open_in_safari("https://example.test/")
+    assert len(called) == 1
