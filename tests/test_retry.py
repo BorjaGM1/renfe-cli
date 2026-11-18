@@ -9,6 +9,7 @@ import pytest
 from typer.testing import CliRunner
 
 from renfe import cli, config, live, retry
+from renfe.delays import TIMETABLE_URL
 from renfe.errors import UpstreamError
 
 from fakes import FakeRenfe, flaky, live_map, path
@@ -184,6 +185,7 @@ def test_status_retries_the_map_and_says_so(monkeypatch):
     use(monkeypatch, fake)
     out = json.loads(invoke("status", "03100").stdout)
     assert out["delay_minutes"] == 12 and len(fake.live_requests()) == 3
+    assert [str(r.url) for r in fake.requests].count(TIMETABLE_URL) == 1
     assert out["retries"] == [{"request": "live map", "tries": 3, "recovered": True,
                                "errors": ["connection dropped (RemoteProtocolError)"] * 2}]
 

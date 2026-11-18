@@ -294,6 +294,7 @@ def watch_cmd(
                 retried: list[dict] = []  # this check's: not carried to later lines
                 try:
                     now = live.status(live.fetch(transport=client.transport, retries=retried), number, names, retried)
+                    now.update(delays_mod.status_fields(number))
                 except (UpstreamError, ApiShapeError) as err:  # a hiccup: one line per outage, and it keeps watching
                     unreadable = unreadable + 1 if isinstance(err, ApiShapeError) else 0
                     if unreadable >= config.WATCH_MAX_UNREADABLE:

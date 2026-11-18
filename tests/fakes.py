@@ -3,8 +3,10 @@ are public timetable data."""
 
 import base64
 import copy
+import io
 import json
 import re
+import zipfile
 
 import httpx
 
@@ -161,6 +163,24 @@ LIVE_MAP = live_map(map_train("03100", 12, "60000", "04040", "2027-01-29T10:32:0
                     map_train("00500", 5, "04040", "04040", "2027-01-29T09:33:00", origin="04040"))
 
 
+def timetable(trips="", stops="", calendar=None, exceptions="daily,20270129,1"):
+    tables = {
+        "trips": ("service_id,trip_short_name,trip_id", trips),
+        "stop_times": ("trip_id,stop_sequence,stop_id,arrival_time,departure_time", stops),
+    }
+    if calendar is not None:
+        tables["calendar"] = ("start_date,end_date,monday,tuesday,wednesday,thursday,friday,saturday,sunday,service_id",
+                              calendar)
+    if exceptions is not None:
+        tables["calendar_dates"] = ("service_id,date,exception_type", exceptions)
+    data = io.BytesIO()
+    with zipfile.ZipFile(data, "w", zipfile.ZIP_DEFLATED) as archive:
+        for table, (header, rows) in tables.items():
+            lines = [header, *rows.splitlines()]
+            archive.writestr(table + ".txt", "".join(line + "    \r\n" for line in lines))
+    return data.getvalue()
+
+
 class FakeRenfe:
     """Routes requests by URL; records them for assertions."""
 
@@ -194,6 +214,8 @@ class FakeRenfe:
             return httpx.Response(200, json=priced(body["travels"][0]["routes"]))
         if request.url.host == "venta.renfe.com":
             return self.legacy(request)
+        if url.endswith("/google_transit.zip"):
+            return httpx.Response(200, content=timetable())
         if url == config.LIVE_MAP_URL:
             return httpx.Response(200, json=self.live)
         return httpx.Response(404, json={"codeError": "NOT_FOUND"})

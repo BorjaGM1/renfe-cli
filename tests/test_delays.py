@@ -7,6 +7,7 @@ import pytest
 from typer.testing import CliRunner
 
 from renfe import cli, config, live
+from renfe.delays import TIMETABLE_URL
 
 from fakes import FakeRenfe, live_map, map_train
 
@@ -43,9 +44,10 @@ def test_status_of_a_train_on_the_map(fake):
         "previous_station": {"code": "60000", "name": "Madrid-Puerta de Atocha-Almudena Grandes"},
         "next_station": {"code": "04040", "name": "Zaragoza-Delicias", "expected_arrival": "2027-01-29T10:32:00+01:00"},
         "overdue": False, "reported_at": "2027-01-29T09:29:40+01:00", "map_updated": "2027-01-29T09:30:00+01:00",
-        "notice": None, "retries": [],
+        "notice": None, "retries": [], "requested_train": "03100", "scheduled_departure": None,
+        "scheduled_arrival": None, "schedule_match": "unmatched", "number_segments": [],
     }
-    assert [str(r.url) for r in fake.requests] == [config.LIVE_MAP_URL]  # one request, and none to the search's API
+    assert [str(r.url) for r in fake.requests] == [config.LIVE_MAP_URL, TIMETABLE_URL]
 
 
 def test_status_takes_the_number_without_its_leading_zero(fake):

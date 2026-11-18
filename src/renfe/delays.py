@@ -9,11 +9,12 @@ import zlib
 from collections import defaultdict
 from collections.abc import Iterator
 from datetime import date, timedelta
+from itertools import chain
 
 import httpx
 
 from . import cachefile, config, live, retry, train_numbers
-from .errors import ApiShapeError, RenfeError, UpstreamError
+from .errors import ApiShapeError, BlockedError, RenfeError, UpstreamError
 from .train_numbers import Stop, Trips
 
 TIMETABLE_URL = "https://ssl.renfe.com/gtransit/Fichero_AV_LD/google_transit.zip"
@@ -97,13 +98,18 @@ def _download(transport: httpx.BaseTransport | None) -> bytes:
     try:
         with httpx.Client(transport=transport, timeout=config.REQUEST_TIMEOUT) as http:
             with http.stream("GET", TIMETABLE_URL) as response:
-                if response.status_code != 200:
-                    status = response.status_code
-                    html = "html" in response.headers.get("content-type", "").lower()
+                status = response.status_code
+                if status in (403, 429) or "html" in response.headers.get("content-type", "").lower():
+                    raise BlockedError(f"Renfe timetable: blocked (HTTP {status})", status=status)
+                chunks = response.iter_bytes(chunk_size=8192)
+                first = next(chunks, b"")
+                if first.lstrip().lower().startswith((b"<!doctype html", b"<html", b"<head", b"<body")):
+                    raise BlockedError(f"Renfe timetable: returned an HTML page (HTTP {status})", status=status)
+                if status != 200:
                     raise UpstreamError(f"Renfe timetable: HTTP {status}", status=status,
-                                        transient=None if html else retry.status_failure(status))
+                                        transient=retry.status_failure(status))
                 data = bytearray()
-                for chunk in response.iter_bytes():
+                for chunk in chain((first,), chunks):
                     data.extend(chunk)
                     if len(data) > 32 * 1024**2:
                         raise ApiShapeError("Renfe timetable: download too large")
@@ -161,22 +167,30 @@ def _matches(row: dict, wanted: str) -> bool:
     return live.key(row["train"]) == wanted or any(live.key(s["train"]) == wanted for s in row["number_segments"])
 
 
+def status_fields(number: str) -> dict:
+    return {"requested_train": number.zfill(5), "scheduled_departure": None, "scheduled_arrival": None,
+            "schedule_match": None, "number_segments": []}
+
+
 def status(board: live.Board, number: str, names: dict[str, str], *, transport: httpx.BaseTransport | None,
            retries: list[dict]) -> dict:
-    result = live.status(board, number, names, retries)
-    if result["on_map"]:
-        return result
     wanted = live.key(number)
-    candidates = train_numbers.timetable_numbers({wanted})
+    candidates = {wanted} if wanted in board.trains else train_numbers.timetable_numbers({wanted})
     entries = [e for key, e in board.trains.items() if key in candidates]
     rows, notice = _scheduled_rows(board, entries, names, transport, retries)
     matches = [r for r in rows if _matches(r, wanted)]
     if len(matches) == 1:
-        return {**matches[0], "requested_train": wanted.zfill(5), "retries": retries}
+        result = {**matches[0], "requested_train": wanted.zfill(5), "retries": retries}
+        if notice:
+            result["notice"] = " ".join(part for part in (result["notice"], notice) if part)
+        return result
+    result = {**live.status(board, wanted, names, retries), **status_fields(wanted)}
     if matches:
+        result["schedule_match"] = "ambiguous"
         result["matching_trains"] = sorted(r["train"] for r in matches)
         result["notice"] = "Several live trains use this ticket number on a verified section. Check their routes."
     elif notice:
+        result["schedule_match"] = "unavailable"
         result["notice"] += f" Ticket-number lookup unavailable. {notice}"
     result["retries"] = retries
     return result

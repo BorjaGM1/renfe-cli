@@ -203,9 +203,14 @@ page (`tiempo-real.largorecorrido.renfe.com`, no key or session). TRAIN is a num
 (`03081`, leading zeros optional); for a train with a change, one leg's number. It returns
 `delay_minutes` (negative: early), the train's origin and destination, its previous and next station (with
 the expected arrival there), `overdue`, `reported_at`, `map_updated` and `retries` (as in `search`, for the
-map's request). `reported_at` is the time on the
+map or timetable request). `reported_at` is the time on the
 train's entry; Renfe refreshes it every few minutes even when the entry's delay and stations are hours old,
 so it doesn't show how fresh they are.
+
+Every status includes `requested_train`, `scheduled_departure`, `scheduled_arrival`, `schedule_match` and
+`number_segments`. A direct map hit takes priority and uses the same timetable matching as `delays`. If
+the timetable fails, the live result still prints with `schedule_match: "unavailable"` and the reason in
+`notice`. Unknown times are null and unknown sections are an empty array.
 
 When a ticket number is absent from the map but a published partner number is present, `renfe status TRAIN`
 checks the timetable for a matching section. A unique match includes the ticket number in `requested_train`
