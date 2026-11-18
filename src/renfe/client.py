@@ -9,11 +9,14 @@ The key and token are kept together in the cache dir (`session.json`, mode 0600)
 about to expire, so a timetable search usually sends one request instead of three (fares add one per 3
 trains). Minting always re-reads the web config, so a rotated key heals within one token lifetime.
 
-One retry exists: when Renfe answers 401 to a session read from disk, that session is replaced (by a
-newer one another run saved, or a fresh one) and the request is sent once more. A 403 is a block even
-then: it is reported, and the file is dropped so the next run starts afresh. A failed mint is not
-repeated for 30 s. Nothing else is retried: on a block, rate limit or outage we stop and report.
-Errors never echo the key, the token or a body.
+Every request (web config, token, search-travel, journey-search) gets up to 3 tries (retry.py), logged as one
+entry in `retries`. A one-off failure (a 500, 502, 503 or 504 that isn't an HTML page, or a connection that drops
+or is refused) is tried again 1 s and then 2 s later. And when Renfe answers 401 to a session read from disk, that
+session is replaced (by a newer one another run saved, or a fresh one) and the request is sent once more at once:
+one of the same 3 tries. A 403 is a block even then: it is reported, and the file is dropped so the next run starts
+afresh. A failed mint (its own 3 tries) is not repeated for 30 s, nor by the call that needed it. Nothing else is
+retried: on a block, rate limit, timeout or lasting outage we stop and report. Errors never echo the key, the
+token or a body.
 
 Pacing is off by default (Renfe answers in 0.1-0.5 s and the web app fires its calls back to back).
 `spacing` > 0 turns on the old mode: one request at a time across every `renfe` process on the machine,
@@ -34,7 +37,7 @@ from typing import Any
 
 import httpx
 
-from . import cachefile, config
+from . import cachefile, config, retry
 from .errors import ApiShapeError, AuthError, BlockedError, RenfeError, UpstreamError, UsageError
 
 try:
@@ -153,6 +156,7 @@ class RsvClient:
         self._generation = 0  # bumped whenever the session is replaced or dropped
         self._mint_error: RenfeError | None = None
         self._mint_error_at = 0.0
+        self.retries: list[dict] = []  # each request that had to be retried (retry.py), for the output
         self._http = httpx.Client(
             timeout=timeout,
             transport=transport,
@@ -172,14 +176,21 @@ class RsvClient:
 
     # --- transport -------------------------------------------------------------------------------
 
-    def _send(self, method: str, url: str, *, label: str, headers: dict[str, str], body: Any = None) -> Any:
+    def _send(self, method: str, url: str, *, label: str, headers: dict[str, str], body: Any = None,
+              may_retry: Callable[[], bool] | None = None) -> Any:
+        """One request, tried again after a one-off failure (retry.py); `may_retry` can stop that."""
+        return retry.call(label, lambda: self._send_once(method, url, label=label, headers=headers, body=body),
+                          self.retries, may_retry=may_retry)
+
+    def _send_once(self, method: str, url: str, *, label: str, headers: dict[str, str], body: Any = None) -> Any:
         with self._pacer.turn():
             try:
                 response = self._http.request(method, url, headers=headers, json=body)
-            except httpx.TimeoutException:
+            except httpx.TimeoutException:  # never retried: it already cost the whole timeout
                 raise UpstreamError(f"{label}: Renfe did not answer in time") from None
             except httpx.RequestError as exc:  # transport, decoding, redirect-loop errors
-                raise UpstreamError(f"{label}: request failed ({type(exc).__name__})") from None
+                raise UpstreamError(f"{label}: request failed ({type(exc).__name__})",
+                                    transient=retry.connection_failure(exc)) from None
         return _checked_json(response, label)
 
     # --- anonymous session -----------------------------------------------------------------------
@@ -316,15 +327,29 @@ class RsvClient:
 
     def _call(self, method: str, path: str, label: str, body: Any = None,
               may_resend: Callable[[], bool] | None = None) -> Any:
+        """One API call: 3 tries at most, shared by the retries and the one stale-session resend, and one entry in
+        `retries` for all of them. A failed mint isn't tried again here: it had its own tries."""
         url = config.API_BASE + path
-        headers, generation = self._api_headers()
-        try:
-            return self._send(method, url, label=label, headers=headers, body=body)
-        except (AuthError, BlockedError) as err:
-            if not self._stale(err, generation) or (may_resend is not None and not may_resend()):
-                raise
-        headers, _ = self._api_headers()
-        return self._send(method, url, label=label, headers=headers, body=body)
+        state = {"generation": 0, "sent": False, "resent": False}
+
+        def once() -> Any:
+            state["sent"] = False
+            headers, state["generation"] = self._api_headers()
+            state["sent"] = True
+            return self._send_once(method, url, label=label, headers=headers, body=body)
+
+        def stale(err: RenfeError) -> str | None:
+            if (not state["sent"] or state["resent"] or not isinstance(err, (AuthError, BlockedError))
+                    or not self._stale(err, state["generation"])):
+                return None
+            state["resent"] = True
+            return f"session refused ({err.status}), sent again with another"
+
+        def setup_failed(err: RenfeError) -> str | None:  # not the call's own failure: the session it needed
+            return None if state["sent"] else f"new session failed: {err.message}"
+
+        return retry.call(label, once, self.retries, resend=stale, describe=setup_failed,
+                          may_retry=lambda: state["sent"] and (may_resend is None or may_resend()))
 
     # --- API calls -------------------------------------------------------------------------------
 
@@ -333,8 +358,8 @@ class RsvClient:
 
     def post(self, path: str, body: Any, *, label: str | None = None,
              may_resend: Callable[[], bool] | None = None) -> Any:
-        """`may_resend` is asked before the one stale-session resend; False reports the refusal instead
-        (fare batches use it so nothing more is sent once another batch was blocked)."""
+        """`may_resend` is asked before the one stale-session resend and before each retry; False reports the
+        failure instead (fare batches use it so nothing more is sent once another batch was blocked)."""
         return self._call("POST", path, label or path, body, may_resend)
 
 
@@ -357,13 +382,14 @@ def _checked_json(response: httpx.Response, label: str) -> Any:
         except ValueError:
             raise ApiShapeError(f"{label}: response is not JSON", status=status) from None
     if status in (403, 429):
-        retry = response.headers.get("retry-after", "")
-        hint = f"; retry after {retry} s" if _RETRY_AFTER.fullmatch(retry) else ""
+        wait = response.headers.get("retry-after", "")
+        hint = f"; retry after {wait} s" if _RETRY_AFTER.fullmatch(wait) else ""
         raise BlockedError(f"{label}: Renfe refused the request ({status}){hint}; wait before trying again", status=status)
     if status == 401:
         raise AuthError(f"{label}: Renfe refused the anonymous session (401)", status=status)
     if status >= 500:
-        raise UpstreamError(f"{label}: Renfe returned a server error ({status})", status=status)
+        raise UpstreamError(f"{label}: Renfe returned a server error ({status})", status=status,
+                            transient=retry.status_failure(status))
     if status in (400, 404, 409, 422):
         code = _renfe_code(response)
         raise UsageError(f"{label}: Renfe rejected the request ({status})", status=status, code=code)

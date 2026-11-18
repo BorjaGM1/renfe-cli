@@ -49,3 +49,14 @@ def shipped_stations(monkeypatch):
 
     every = stations.parse(SHIPPED)
     monkeypatch.setattr(stations, "bundled", lambda: every)
+
+
+@pytest.fixture(autouse=True)
+def retry_pauses(request, monkeypatch):
+    """Offline tests never really wait between retries: the pauses are recorded here instead."""
+    pauses: list[float] = []
+    if not request.node.get_closest_marker("live"):
+        from renfe import retry
+
+        monkeypatch.setattr(retry, "_sleep", pauses.append)
+    return pauses

@@ -10,7 +10,11 @@ shop, as a guest. No account, no browser to search, and JSON output. For trips o
 > website sends, no more: one timetable call, then fares 3 trains per call with at most 3 calls in
 > flight; before 25 Jan 2027, the four requests the legacy shop's results page makes. If Renfe blocks
 > or rate-limits it, it stops and says so (exit 5); before 25 Jan 2027 it falls back instead (see
-> below). The only retry is one resend when Renfe rejects a saved session with 401 (see below).
+> below). What it retries: a one-off failure (a 500, 502, 503 or 504 with a JSON or empty body, or a
+> connection that drops or is refused), up to 3 tries per request, 1 s and 2 s apart, listed in the
+> output's `retries`; one of those 3 tries can be the resend when Renfe rejects a saved session with 401
+> (see below). An HTML page at any status is taken for bot protection and tried once; so are a block, a
+> rate limit and a timeout. The legacy shop has its own rule (below).
 > Live delays (`status`, `watch`, and `search` for today) come from a second host the website's search never
 > calls: Renfe's public live train map, one request per check (see [Delays](#delays)).
 
@@ -35,6 +39,13 @@ uv run renfe watch 03081                                  # a JSON line each tim
 - fares for one adult, cheapest first;
 - `delay_minutes`: for today, the train's live delay, else `null`. A train with a change also has one on
   each leg, and the train's is the first of those the map has.
+
+It also returns `retries`, empty when nothing was retried: one entry per request that failed once and was
+tried again, with `request` (which one), `tries`, `errors` (what failed on each try, such as
+`server error (500)` or `connection dropped (RemoteProtocolError)`) and `recovered` (whether a later try
+worked). A retry that worked isn't a problem with the list, so it never goes into `notice`. A request the
+search stopped waiting for (the live map, see [Delays](#delays)) ends with an error saying so. When a
+command fails after retries, the stderr error object carries the same `retries` list.
 
 It also returns `shop`: the page on Renfe's website where that search continues, to pick the train and
 pay.
@@ -98,7 +109,15 @@ Speed (measured 2026-11-15): a search takes about 0.3–0.5 s, and a full day of
 about 1.4 s. The anonymous session (a 30-minute token and the site's public API key) is kept in the
 cache folder as `session.json`, so a timetable search usually sends a single request; fares add one per
 3 trains. If Renfe answers 401 to a saved session, the CLI opens a new one and resends that request
-once. A 403 is reported as a block, and the saved session is dropped so the next run starts afresh.
+once. A 403 is reported as a block, and the saved session is dropped so the next run starts afresh. A
+500, 502, 503 or 504, or a dropped or refused connection, is tried up to 3 times, 1 s and then 2 s apart
+(a 24-hour soak test on 18 Nov saw single requests fail like that and work again a minute later). The
+401 resend counts as one of those 3 tries and goes at once; a retry after it waits 1 s, as a first retry
+does, and a 403 to a saved session drops the file even on the third try. An HTML page is bot protection
+whatever its status (a 503 page too), and isn't retried. Neither is a timeout: one already costs the whole
+25 s timeout. With no network at all, a search takes a few seconds longer to fail than before (3 s of
+pauses; 6 s before 25 Jan 2027, when the legacy shop is tried first), since a DNS or TLS failure counts as a
+refused connection.
 Before 25 Jan 2027 a search is the legacy shop's four requests instead, about 0.8–1.8 s with fares
 (measured 2026-11-17), and nothing is saved: its cookies live in memory for that one search. A search for
 today also sends one request to Renfe's live map, alongside the others (see [Delays](#delays)).
@@ -112,10 +131,18 @@ There, `type_code` and `intermediate_stops` are `null`, and a train that isn't o
 sale at the moment", not running, or only wheelchair places left) has `available: false` and no fares.
 `renfe search` only reads the list. Start a booking separately with `renfe checkout`.
 
-If the legacy shop fails (a block or rate limit, a waiting room or challenge page, an answer the CLI
-can't read, or an empty list), you get the new system's partial list instead, without fares, and a
-`notice` saying what failed; the exit code stays 0. The CLI never tries to get past a waiting room or a
-captcha. `shop.url` and `renfe open` take you to the full list on Renfe's website either way.
+A one-off failure at any of the legacy shop's four requests (a 500 or 502 without `Retry-After`, whatever
+its body, or a dropped connection) starts its search over from the first request, with a new guest session
+and fresh cookies, up to 3 tries in all. A 503 or 504 there isn't retried: it may be an edge deny or a
+waiting room. If it still fails (or a block or rate limit, a waiting room or challenge page, or an answer
+the CLI can't read stops it), or it lists no trains, you get the new system's partial list instead, without
+fares, and a `notice` saying what failed; the exit code stays 0. The one exception is today after the last
+departure: the legacy shop lists only trains that haven't left, so when it lists none and the new system
+has no train leaving from now on either, nothing failed, and the only notice is "No more trains today".
+On any other date (or judged by `--after`), an empty list from the legacy shop keeps the fallback notice:
+before 25 Jan the new system lists only part of the timetable, so its being empty too proves little. The
+CLI never tries to get past a waiting room or a captcha. `shop.url` and `renfe open` take you to the full
+list on Renfe's website either way.
 
 From 25 Jan 2027 the CLI's list matches the website's exactly, trains and cheapest fares (checked
 against the web for Friday 29 Jan: 22 trains each).
@@ -133,7 +160,8 @@ current list, in case the station is newer than the shipped one; that list is ke
 page (`tiempo-real.largorecorrido.renfe.com`, no key or session). TRAIN is a number from `renfe search`
 (`03081`, leading zeros optional); for a train with a change, one leg's number. It returns
 `delay_minutes` (negative: early), the train's origin and destination, its previous and next station (with
-the expected arrival there), `overdue`, `reported_at` and `map_updated`. `reported_at` is the time on the
+the expected arrival there), `overdue`, `reported_at`, `map_updated` and `retries` (as in `search`, for the
+map's request). `reported_at` is the time on the
 train's entry; Renfe refreshes it every few minutes even when the entry's delay and stations are hours old,
 so it doesn't show how fresh they are.
 - **While it runs, and mainly long- and medium-distance trains.** The map lists trains around the time they
@@ -148,12 +176,18 @@ so it doesn't show how fresh they are.
 - **Whichever run is on the map.** The map has no run date, so after midnight `status` and `watch` can show
   yesterday's run of a train that runs again today, still going (on 18 Nov at 02:14, 18135 of the 17th, 170
   minutes late). Only `search` guards against that (below).
-- **Often unreachable.** On 17 Nov 2026 the map was unreachable from Spain for over two hours while it
-  answered from other countries. `status` fails with exit 5 when the map refuses the connection, or doesn't
-  connect or send data for 10 s at a time.
+- **Unreachable at times.** On 17 Nov 2026 it refused connections from Spain for over two hours while it
+  answered from other countries. On 18 Nov, checked every 15 minutes from 12:24 to 22:04, it answered every
+  time but once, when it dropped connections for under a minute (4 requests failed over about 10 seconds,
+  and one a minute later worked). A refused or dropped connection, or a 500, 502, 503 or 504 that isn't an
+  HTML page, is tried up to 3 times (listed in `retries`); an HTML page is taken for bot protection and
+  tried once. `status` fails with exit 5 when it still fails, or when the
+  map doesn't connect or send data for 10 s at a time (a timeout isn't retried).
 
 **In `search`, for today only.** The search asks the map alongside its own requests and waits for it at most
-2.5 s from its start, so a map that hangs costs at most that. Each train on the map gets its
+2.5 s from its start, so a map that hangs costs at most that. It retries the map only when the pause and
+another try can end within those 2.5 s; a retry still running when the search stops waiting is listed in
+`retries` as not recovered. Each train on the map gets its
 `delay_minutes`, the last one recorded, as in `status`; one that isn't gets `null`, and so do they all on
 other days. `delays_included` says whether the map answered: when it doesn't, `notice` says the delays are
 unknown, and the search and its exit code are unaffected. A train gets no delay from an entry left over on
@@ -178,9 +212,11 @@ output, on the first check and whenever the train's delay, its next station, the
 is the finer signal: on 18 Nov from 06:29 to 06:59 it moved 264 times with the delay and next station
 unchanged, mostly by a minute either way, and a train on the map throughout gave about 10 lines in those
 30 minutes (at most 15). It keeps checking a train that isn't on the map yet, so you can start it before
-departure. Two other lines carry an `event` instead: `map_unreachable` (with the `error`) when the map stops
-answering, once per outage, after which the next answer prints a line whether or not anything changed; and
-`ended` when the watch stops on its own. Pipe it into whatever pings you; the CLI sends no notifications itself:
+departure. Each line has that check's `retries`, which don't count as a change. Two other lines carry an
+`event` instead: `map_unreachable` (with the `error` and `retries`) when the map stops answering, after its
+retries, once per outage, after which the next answer prints a line whether or not anything changed; and
+`ended` when the watch stops on its own. Pipe it into whatever pings you; the CLI sends no notifications
+itself:
 
 ```sh
 uv run renfe watch 03081 | while read -r line; do

@@ -42,7 +42,7 @@ def test_live_legacy_shop_lists_trains_with_fares():
 
 
 def test_live_status_of_a_train_on_the_map():
-    """One request to Renfe's live map. Skips, not fails, when it doesn't answer (often, from Spain) or is empty
+    """One request to Renfe's live map. Skips, not fails, when it doesn't answer (at times, from Spain) or is empty
     (at night)."""
     from renfe import live
     from renfe.errors import UpstreamError

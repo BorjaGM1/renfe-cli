@@ -15,11 +15,14 @@ class RenfeError(Exception):
     exit_code = 1
     kind = "internal"
 
-    def __init__(self, message: str, *, status: int | None = None, code: str | None = None):
+    def __init__(self, message: str, *, status: int | None = None, code: str | None = None,
+                 transient: str | None = None):
         super().__init__(message)
         self.message = message
         self.status = status
         self.code = code
+        self.transient = transient  # what failed, when another try may work (retry.py); not in the output
+        self.retries: list[dict] = []  # the command's retried requests, when it failed after them (cli.py)
 
     def to_dict(self) -> dict:
         out: dict = {"type": self.kind, "message": self.message, "exit_code": self.exit_code}
@@ -27,6 +30,8 @@ class RenfeError(Exception):
             out["http_status"] = self.status
         if self.code:
             out["renfe_code"] = self.code
+        if self.retries:
+            out["retries"] = self.retries
         return out
 
 
@@ -45,15 +50,17 @@ class AuthError(RenfeError):
 
 
 class BlockedError(RenfeError):
-    """403, 429 or an HTML page instead of JSON: stop and back off, never retry automatically (the one
-    resend in the client is for a 401 to a saved session, see client.py)."""
+    """403, 429 or an HTML page instead of JSON: stop and back off, never retried. (What is retried: a 500, 502,
+    503 or 504 and a dropped connection, up to 3 tries, see retry.py; and one resend for a 401 to a saved
+    session, see client.py.)"""
 
     exit_code = EXIT_BLOCKED
     kind = "blocked"
 
 
 class UpstreamError(BlockedError):
-    """Renfe 5xx, timeout or dropped connection. Shares exit code 5 with blocks and rate limits."""
+    """Renfe 5xx, timeout or dropped connection, after any retries. Shares exit code 5 with blocks and rate
+    limits."""
 
     kind = "upstream_unavailable"
 

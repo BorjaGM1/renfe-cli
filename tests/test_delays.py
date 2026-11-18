@@ -43,7 +43,7 @@ def test_status_of_a_train_on_the_map(fake):
         "previous_station": {"code": "60000", "name": "Madrid-Puerta de Atocha-Almudena Grandes"},
         "next_station": {"code": "04040", "name": "Zaragoza-Delicias", "expected_arrival": "2027-01-29T10:32:00+01:00"},
         "overdue": False, "reported_at": "2027-01-29T09:29:40+01:00", "map_updated": "2027-01-29T09:30:00+01:00",
-        "notice": None,
+        "notice": None, "retries": [],
     }
     assert [str(r.url) for r in fake.requests] == [config.LIVE_MAP_URL]  # one request, and none to the search's API
 
@@ -408,19 +408,37 @@ def test_watch_keeps_polling_a_train_that_hasnt_left_yet(monkeypatch):
 
 
 def test_a_hiccup_is_reported_once_and_the_watch_goes_on(monkeypatch):
-    watching(monkeypatch, [at(12), httpx.ConnectError("refused"), httpx.Response(503, json={}),
-                           httpx.Response(200, text="cut off"), at(12), at(20)], stop_after=5)
+    """Each answer below is one request; a check makes up to 3 (retry.py)."""
+    refused, down = httpx.ConnectError("refused"), httpx.Response(503, json={})
+    watching(monkeypatch, [at(12),                   # check 1
+                           refused, refused, refused,  # check 2: 3 tries, then the outage line
+                           down, down, down,           # check 3: still down, no new line
+                           at(12),                   # check 4: back, same state, printed anyway
+                           at(20)], stop_after=4)    # check 5
     result = invoke("watch", "03100")
     assert result.exit_code == 0, result.output
     out = lines(result)
     assert [o.get("event") or o["delay_minutes"] for o in out] == [12, "map_unreachable", 12, 20]  # one per outage
-    assert out[1] == {"train": "03100", "event": "map_unreachable", "error": out[1]["error"]}
+    assert out[1] == {"train": "03100", "event": "map_unreachable", "error": out[1]["error"], "retries": [
+        {"request": "live map", "tries": 3, "errors": ["no connection (ConnectError)"] * 3, "recovered": False}]}
     assert out[1]["error"]["type"] == "upstream_unavailable" and result.stderr == ""
+    assert out[2]["retries"] == [] and out[3]["retries"] == []  # each line has its own check's retries
 
 
 def test_an_outage_from_the_first_check_says_so_at_once(monkeypatch):
-    watching(monkeypatch, [httpx.ConnectError("refused"), httpx.ConnectError("refused"), at(12)], stop_after=2)
+    refused = httpx.ConnectError("refused")
+    watching(monkeypatch, [refused, refused, refused, at(12)], stop_after=1)
     assert [o.get("event") or o["delay_minutes"] for o in lines(invoke("watch", "03100"))] == ["map_unreachable", 12]
+
+
+def test_a_check_that_recovers_on_a_retry_prints_its_retries_only_with_a_change(monkeypatch, retry_pauses):
+    """The retry isn't part of the change key: an unchanged check that needed one prints nothing."""
+    dropped = httpx.RemoteProtocolError("peer closed connection")
+    watching(monkeypatch, [at(12), dropped, at(12), dropped, at(15)], stop_after=2)
+    out = lines(invoke("watch", "03100"))
+    assert [o["delay_minutes"] for o in out] == [12, 15] and retry_pauses == [1.0, 1.0]
+    assert out[1]["retries"] == [{"request": "live map", "tries": 2, "recovered": True,
+                                  "errors": ["connection dropped (RemoteProtocolError)"]}]
 
 
 def test_three_unreadable_answers_in_a_row_stop_the_watch(monkeypatch):

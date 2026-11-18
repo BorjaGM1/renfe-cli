@@ -274,16 +274,19 @@ def test_first_block_in_batch_order_is_reported(monkeypatch, later_first):
     monkeypatch.setattr(config, "FARE_BATCH", 1)
     both_sent = threading.Barrier(2, timeout=5)
     answered = threading.Event()
+    seen = set()
 
     def journey(request):
         batch = services(request)
         if batch not in ("03000", "00600+00500"):
             return fake_priced(request)
-        both_sent.wait()  # first and second batch are both in flight
-        # answer in either order: the error reported must not depend on it
-        if (batch == "00600+00500") != later_first:
-            answered.wait(5)
-        answered.set()
+        if batch not in seen:  # a retry of the 503 (until the 429 stops it) answers at once
+            seen.add(batch)
+            both_sent.wait()  # first and second batch are both in flight
+            # answer in either order: the error reported must not depend on it
+            if (batch == "00600+00500") != later_first:
+                answered.wait(5)
+            answered.set()
         return httpx.Response(503 if batch == "03000" else 429, json={})
 
     out = run(FakeRenfe(**{config.JOURNEY_SEARCH_PATH: journey}))

@@ -176,6 +176,11 @@ class FakeRenfe:
         for key, fn in self.overrides.items():
             if key in url:
                 return fn(request)
+        return self.default(request)
+
+    def default(self, request: httpx.Request) -> httpx.Response:
+        """The answer without overrides (an override can fall back to it)."""
+        url = str(request.url)
         if url == config.WEB_CONFIG_URL:
             return httpx.Response(200, json={"arch": {"security": {"apiKey": API_KEY}}})
         if url.endswith(config.PUBLIC_TOKEN_PATH):
@@ -219,3 +224,19 @@ class FakeRenfe:
 
     def live_requests(self) -> list[httpx.Request]:
         return [request for request in self.requests if str(request.url) == config.LIVE_MAP_URL]
+
+
+def flaky(fake: FakeRenfe, *failures):
+    """An override that answers with `failures` first (responses or exceptions to raise), then as `fake` would."""
+    queue = list(failures)
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        if not queue:
+            return fake.default(request)
+        got = queue.pop(0)
+        if isinstance(got, Exception):
+            raise got
+        return got
+
+    return answer
+

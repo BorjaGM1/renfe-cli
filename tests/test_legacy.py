@@ -158,7 +158,7 @@ FAILURES = {
         200, headers={"content-type": "text/html"}, text="<html>queue</html>"), 1, "waiting room"),
     "a challenge instead of the results page": ("buscarTrenEnlaces.do", lambda r: httpx.Response(
         200, headers={"content-type": "text/html"}, text="<html>challenge</html>"), 2, "not the results page"),
-    "server error": ("buscarTrenEnlaces.do", lambda r: httpx.Response(503), 2, "server error (503)"),
+    "server error": ("buscarTrenEnlaces.do", lambda r: httpx.Response(503), 2, "server error (503)"),  # not retried
     "timeout": ("generateId", lambda r: (_ for _ in ()).throw(httpx.ReadTimeout("slow")), 3, "did not answer"),
     "no session id": ("generateId", lambda r: dwr_response('r.handleCallback("0","0",null);'), 3, "no session id"),
     "an HTML page for DWR": ("getTrainsList", lambda r: httpx.Response(
@@ -179,7 +179,7 @@ def test_a_failure_falls_back_to_the_new_systems_list_with_a_notice(name):
     url_part, answer, sent, reason = FAILURES[name]
     fake = FakeRenfe(**{url_part: answer})
     out = run(fake)
-    assert len(fake.legacy_requests()) == sent  # it stopped at the failure: nothing retried, nothing more sent
+    assert len(fake.legacy_requests()) == sent  # it stopped at the failure (only a 500 or 502 is tried again)
     assert reason in out["notice"] and "legacy shop" in out["notice"] and "may be missing trains" in out["notice"]
     assert out["count"] == 4 and out["fares_included"] is False and all(t["fares"] is None for t in out["trains"])
     assert "Texto libre" not in out["notice"]

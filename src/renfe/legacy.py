@@ -10,9 +10,13 @@ A guest search, sent the way the shop's results page sends it (observed 2026-11-
      small parser here and never evaluated.
 The same DWR interface also selects a train and validates fares, which start the booking flow: never called.
 
-Cookies live in memory for the one search. Nothing is retried. A 403/429, a redirect anywhere but the results
-page (a waiting room), an HTML page where DWR was expected, or an answer that doesn't parse raises a
-RenfeError, and search() falls back to the new system's partial list.
+Cookies live in memory for the one search. A one-off failure at any step (a 500 or 502 without Retry-After, or a
+connection that drops or is refused) starts the search over from step 1, with a new guest session and fresh cookies,
+up to 2 more times (retry.py; seen on 18 Nov 2026: the results page answered 500 once). Those count whatever their
+body: the shop's own pages are HTML. Nothing else is retried: a 503 or 504 (here it may be an edge deny or a waiting
+room), a 403/429, a redirect anywhere but the results page (a waiting room), an HTML page where DWR was expected, a
+timeout, or an answer that doesn't parse raises a RenfeError at once, and search() falls back to the new system's
+partial list.
 """
 
 import html
@@ -27,7 +31,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from . import config
+from . import config, retry
 from .errors import ApiShapeError, BlockedError, UpstreamError
 from .stations import Station
 
@@ -52,9 +56,16 @@ _ON_SALE = ("", "8")  # razonNoDisponible values the results page sells (see _on
 
 
 def trains(origin: Station, destination: Station, day: date, names: dict[str, str], *,
-           transport: httpx.BaseTransport | None = None) -> list[dict]:
+           transport: httpx.BaseTransport | None = None, retries: list[dict] | None = None) -> list[dict]:
     """Every train the legacy shop sells from `origin` to `destination` on `day`, with fares, in the shape
-    search() builds (legs keep `_dep_utc` for sorting)."""
+    search() builds (legs keep `_dep_utc` for sorting). A search that had to start over is logged in `retries`."""
+    return retry.call("legacy shop search (all four requests, started over)",
+                      lambda: _search(origin, destination, day, names, transport), retries)
+
+
+def _search(origin: Station, destination: Station, day: date, names: dict[str, str],
+            transport: httpx.BaseTransport | None) -> list[dict]:
+    """One guest search: a new client, so new cookies, and the four requests."""
     with httpx.Client(
         transport=transport,
         http2=transport is None,
@@ -71,16 +82,24 @@ def trains(origin: Station, destination: Station, day: date, names: dict[str, st
 def _send(http: httpx.Client, method: str, url: str, label: str, **kw: Any) -> httpx.Response:
     try:
         response = http.request(method, url, **kw)
-    except httpx.TimeoutException:
+    except httpx.TimeoutException:  # never retried: it already cost the whole timeout
         raise UpstreamError(f"{label}: Renfe did not answer in time") from None
     except httpx.RequestError as exc:
-        raise UpstreamError(f"{label}: request failed ({type(exc).__name__})") from None
+        raise UpstreamError(f"{label}: request failed ({type(exc).__name__})",
+                            transient=_step(label, retry.connection_failure(exc))) from None
     status = response.status_code
     if status in (403, 429):
         raise BlockedError(f"{label}: Renfe refused the request ({status}); wait before trying again", status=status)
-    if status >= 500:
-        raise UpstreamError(f"{label}: Renfe returned a server error ({status})", status=status)
+    if status >= 500:  # a 503 or 504 here may be an edge deny or a waiting room, and Retry-After asks to wait
+        again = None if "retry-after" in response.headers else retry.status_failure(status, retry.LEGACY_STATUSES)
+        raise UpstreamError(f"{label}: Renfe returned a server error ({status})", status=status,
+                            transient=_step(label, again))
     return response
+
+
+def _step(label: str, failure: str | None) -> str | None:
+    """Which of the four requests failed, for the retries log: "legacy shop results page: server error (500)"."""
+    return f"{label}: {failure}" if failure else None
 
 
 def _station_key(station: Station) -> str:

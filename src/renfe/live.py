@@ -27,7 +27,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from . import config
+from . import config, retry
 from .client import _checked_json
 from .errors import ApiShapeError, AuthError, RenfeError, UpstreamError, UsageError
 
@@ -74,19 +74,27 @@ class MapChanged(ApiShapeError):
                                              "and update renfe/live.py."}
 
 
-def fetch(*, transport: httpx.BaseTransport | None = None, timeout: float = config.LIVE_TIMEOUT) -> Board:
+def fetch(*, transport: httpx.BaseTransport | None = None, timeout: float = config.LIVE_TIMEOUT,
+          retries: list[dict] | None = None, deadline: float | None = None) -> Board:
     """The map as it is now. Raises UpstreamError when it doesn't answer, BlockedError on a block, ApiShapeError
-    when the answer isn't the map."""
+    when the answer isn't the map. A one-off failure (a 5xx, a dropped connection) is tried again, up to 3 tries
+    (retry.py), and logged in `retries`; with a `deadline` (a time.monotonic() value), only while another try can
+    still end before it."""
+    return retry.call(LABEL, lambda: _fetch_once(transport, timeout), retries, deadline=deadline)
+
+
+def _fetch_once(transport: httpx.BaseTransport | None, timeout: float) -> Board:
     with httpx.Client(transport=transport, timeout=timeout, follow_redirects=False,
                       headers={"user-agent": config.USER_AGENT, "accept-language": config.ACCEPT_LANGUAGE}) as http:
         try:
             response = http.get(config.LIVE_MAP_URL, headers={"accept": "application/json"})
-        except httpx.TimeoutException:
+        except httpx.TimeoutException:  # never retried: it already cost the whole timeout
             raise UpstreamError(f"{LABEL}: Renfe did not answer in time") from None
         except httpx.RequestError as exc:
-            raise UpstreamError(f"{LABEL}: request failed ({type(exc).__name__})") from None
+            raise UpstreamError(f"{LABEL}: request failed ({type(exc).__name__})",
+                                transient=retry.connection_failure(exc)) from None
     try:
-        doc = _checked_json(response, LABEL)
+        doc = _checked_json(response, LABEL)  # a 5xx is transient; an HTML page, at any status, is a block
     except (UsageError, AuthError) as err:  # a 401 or 404 here means the map moved, not a bad argument
         raise MapChanged(f"{LABEL}: unexpected HTTP status {err.status}", status=err.status) from None
     except ApiShapeError as err:
@@ -116,14 +124,15 @@ def parse(doc: Any) -> Board:
     return Board(updated=updated, trains=trains)
 
 
-def status(board: Board, number: str, names: dict[str, str]) -> dict:
-    """Train `number` on the map: its delay, previous and next station, and the caveats that apply."""
+def status(board: Board, number: str, names: dict[str, str], retries: list[dict] | None = None) -> dict:
+    """Train `number` on the map: its delay, previous and next station, the caveats that apply, and the requests
+    that had to be retried to get the map."""
     entry = board.trains.get(key(number))
     station = lambda code: {"code": code, "name": names.get(code)} if code else None
     out: dict = {"train": entry["number"] if entry else number.zfill(5), "on_map": entry is not None,
                  "delay_minutes": None, "origin": None, "destination": None, "previous_station": None,
                  "next_station": None, "overdue": None, "reported_at": None, "map_updated": _iso(board.updated),
-                 "notice": None}
+                 "notice": None, "retries": list(retries or [])}
     if entry is None:
         empty = "Renfe's live map lists no trains right now (it is empty at night). " if not board.trains else ""
         out["notice"] = (f"{empty}Train {out['train']} isn't on Renfe's live map, which lists long- and "
@@ -155,16 +164,18 @@ def _late(entry: dict, board: Board) -> timedelta | None:
     return now - entry["expected"] if now and entry["expected"] else None
 
 
-def in_background(transport: httpx.BaseTransport | None) -> Callable[[], tuple[Board | None, str | None]]:
+def in_background(transport: httpx.BaseTransport | None) -> Callable[[], tuple[Board | None, str | None, list[dict]]]:
     """Start fetching the map in a daemon thread, so a search doesn't wait for it. The function returned waits
-    until config.LIVE_SEARCH_BUDGET seconds after the start, at most, then gives the map, or None and why. It
-    never raises: a search never fails, or changes its exit code, because of the map."""
+    until config.LIVE_SEARCH_BUDGET seconds after the start, at most, then gives the map, or None and why, and the
+    map's retries. It never raises: a search never fails, or changes its exit code, because of the map. A one-off
+    failure is tried again only if the pause and another try can end within that budget; a try still running when
+    the search stops waiting shows in the retries as not recovered."""
     budget = config.LIVE_SEARCH_BUDGET
-    deadline, got = time.monotonic() + budget, {}
+    deadline, got, log = time.monotonic() + budget, {}, []
 
     def run() -> None:
         try:
-            got["board"] = fetch(transport=transport, timeout=budget)
+            got["board"] = fetch(transport=transport, timeout=budget, retries=log, deadline=deadline)
         except RenfeError as err:
             got["why"] = err.message
         except Exception as exc:  # a bug here must not reach the search either
@@ -173,10 +184,15 @@ def in_background(transport: httpx.BaseTransport | None) -> Callable[[], tuple[B
     thread = threading.Thread(target=run, name="renfe-live-map", daemon=True)
     thread.start()
 
-    def result() -> tuple[Board | None, str | None]:
+    def result() -> tuple[Board | None, str | None, list[dict]]:
         thread.join(max(0.0, deadline - time.monotonic()))
-        board = got.get("board")
-        return board, None if board else got.get("why", f"{LABEL}: no answer within {budget:g} s")
+        done = dict(got)  # read once, before the log: a board or a failure in it means the thread is done
+        board, running = done.get("board"), not done
+        retries = [{**e, "errors": list(e["errors"])} for e in log]  # copies: a running thread still changes them
+        for e in retries if running else []:  # a re-sent try the search won't wait for
+            e.update(tries=e["tries"] + 1, recovered=False,
+                     errors=e["errors"] + [f"no answer within the search's {budget:g} s budget"])
+        return board, None if board else done.get("why", f"{LABEL}: no answer within {budget:g} s"), retries
 
     return result
 

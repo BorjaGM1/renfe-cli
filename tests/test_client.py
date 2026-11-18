@@ -334,7 +334,8 @@ def test_failed_remint_is_not_repeated_by_parallel_calls():
         futures = [pool.submit(c.get, config.STATIONS_PATH) for _ in range(3)]
         errors = [f.exception() for f in futures]
     assert all(isinstance(e, UpstreamError) for e in errors)
-    assert fake.paths().count("/config/arch-config.json") == 1  # one failed mint, remembered for the others
+    # one failed mint (its 3 tries of a 503), remembered for the others
+    assert fake.paths().count("/config/arch-config.json") == 3
 
 
 def test_mint_failure_is_retried_after_the_cooldown(monkeypatch):
@@ -353,7 +354,7 @@ def test_mint_failure_is_retried_after_the_cooldown(monkeypatch):
             c.get(config.STATIONS_PATH)  # within the cooldown: the remembered error, no request
         now[0] += 31
         c.get(config.STATIONS_PATH)
-    assert fake.paths().count("/config/arch-config.json") == 2
+    assert fake.paths().count("/config/arch-config.json") == 3 + 1  # a 503 is tried 3 times, then the cooldown
 
 
 def test_minted_token_with_unsafe_characters_is_an_api_change():
@@ -399,7 +400,8 @@ def test_disk_session_not_renewed_for_blocks_or_outages(response):
     fake = FakeRenfe(**{config.STATIONS_PATH: lambda r: response})
     with client(fake) as c, pytest.raises(BlockedError):
         c.get(config.STATIONS_PATH)
-    assert fake.paths() == [config.STATIONS_PATH]  # no new token, no second try
+    tries = 3 if response.status_code == 503 else 1  # an outage is retried; a block or a redirect never is
+    assert fake.paths() == [config.STATIONS_PATH] * tries  # and no new token
     assert session_file().exists()
 
 
@@ -426,3 +428,64 @@ def test_parallel_refusals_of_a_disk_session_mint_once():
         assert list(pool.map(lambda _: c.get(config.STATIONS_PATH), range(4))) == [[]] * 4
     assert fake.paths().count(config.PUBLIC_TOKEN_PATH) == 1
     assert fake.paths().count(config.STATIONS_PATH) == 8
+
+
+def test_retries_and_the_stale_session_resend_share_one_budget_of_three_tries(retry_pauses):
+    """500, 500, then 401 to the saved session: 3 tries, then the 401 is reported. Before, the resend started a
+    second round of retries (6 requests) and the log had two entries for the one call."""
+    write_session()
+    answers = [httpx.Response(500, json={}), httpx.Response(500, json={}), httpx.Response(401, json={}),
+               httpx.Response(500, json={}), httpx.Response(500, json={})]
+    fake = FakeRenfe(**{config.SEARCH_TRAVEL_PATH: lambda r: answers.pop(0) if answers else fake.default(r)})
+    with client(fake) as c, pytest.raises(AuthError):
+        c.post(config.SEARCH_TRAVEL_PATH, {}, label="search-travel")
+    assert fake.paths().count(config.SEARCH_TRAVEL_PATH) == 3 and retry_pauses == [1.0, 2.0]
+    assert c.retries == [{"request": "search-travel", "tries": 3, "recovered": False, "errors": [
+        "server error (500)", "server error (500)", "search-travel: Renfe refused the anonymous session (401)"]}]
+
+
+def test_a_stale_session_resent_then_retried_is_one_entry(retry_pauses):
+    """401 to the saved session, resent at once with a new one (no pause), a 500, then the answer: 3 tries, and the
+    one pause is the first retry's, 1 s."""
+    write_session()
+    answers = [httpx.Response(401, json={}), httpx.Response(500, json={})]
+    fake = FakeRenfe(**{config.SEARCH_TRAVEL_PATH: lambda r: answers.pop(0) if answers else fake.default(r)})
+    with client(fake) as c:
+        c.post(config.SEARCH_TRAVEL_PATH, {}, label="search-travel")
+    assert fake.paths().count(config.SEARCH_TRAVEL_PATH) == 3 and retry_pauses == [1.0]
+    assert c.retries == [{"request": "search-travel", "tries": 3, "recovered": True, "errors": [
+        "session refused (401), sent again with another", "server error (500)"]}]
+
+
+def test_a_failed_mint_isnt_tried_again_by_the_call_that_needed_it(retry_pauses):
+    """The web config's own 3 tries, then the call gives up: no second round."""
+    fake = FakeRenfe(**{"arch-config": lambda r: httpx.Response(503, json={})})
+    with client(fake) as c, pytest.raises(UpstreamError):
+        c.get(config.STATIONS_PATH)
+    assert fake.paths().count("/config/arch-config.json") == 3 and config.STATIONS_PATH not in fake.paths()
+    assert [e["request"] for e in c.retries] == ["web config"]
+
+
+def test_a_403_on_the_third_try_still_drops_the_saved_session(retry_pauses):
+    """500, 500, then 403 to the saved session: no fourth try, but the file is dropped as for a 403 on the first."""
+    write_session()
+    answers = [httpx.Response(500, json={}), httpx.Response(500, json={}), httpx.Response(403, json={})]
+    fake = FakeRenfe(**{config.SEARCH_TRAVEL_PATH: lambda r: answers.pop(0)})
+    with client(fake) as c, pytest.raises(BlockedError):
+        c.post(config.SEARCH_TRAVEL_PATH, {}, label="search-travel")
+    assert fake.paths().count(config.SEARCH_TRAVEL_PATH) == 3 and not session_file().exists()
+
+
+def test_a_new_session_failing_after_a_resend_is_named_as_such(retry_pauses):
+    """401 to the saved session; the new session's web config answers 503 three times. The call's entry says the
+    session failed, so its last error isn't read as search-travel's own 503."""
+    write_session()
+    fake = FakeRenfe(**{config.SEARCH_TRAVEL_PATH: refuse_old(401),
+                        "arch-config": lambda r: httpx.Response(503, json={})})
+    with client(fake) as c, pytest.raises(UpstreamError):
+        c.post(config.SEARCH_TRAVEL_PATH, {}, label="search-travel")
+    call = next(e for e in c.retries if e["request"] == "search-travel")
+    assert call == {"request": "search-travel", "tries": 2, "recovered": False, "errors": [
+        "session refused (401), sent again with another",
+        "new session failed: web config: Renfe returned a server error (503)"]}
+

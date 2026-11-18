@@ -6,7 +6,8 @@ import json
 import re
 import sys
 import time as time_mod
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from datetime import date, datetime, time, timedelta
 from typing import Annotated, Any, NoReturn
 
@@ -38,6 +39,20 @@ def make_client() -> RsvClient:
     return RsvClient()
 
 
+@contextmanager
+def _client() -> Iterator[RsvClient]:
+    """make_client(), whose requests that had to be retried go with any RenfeError raised inside, so the stderr
+    error object lists them too."""
+    client = make_client()
+    try:
+        with client:
+            yield client
+    except RenfeError as err:
+        if client.retries and not err.retries:
+            err.retries = [{**e, "errors": list(e["errors"])} for e in client.retries]
+        raise
+
+
 def _fail(err: RenfeError) -> NoReturn:
     typer.echo(render_error(err), err=True)
     raise typer.Exit(err.exit_code)
@@ -62,7 +77,8 @@ def _emit(produce: Callable[[], Any]) -> None:
     typer.echo(text)
     partial = payload.get("fares_error") if isinstance(payload, dict) else None
     if isinstance(partial, dict):
-        typer.echo(json.dumps({"error": partial}, ensure_ascii=False, allow_nan=False), err=True)
+        retried = {"retries": payload["retries"]} if payload.get("retries") else {}
+        typer.echo(json.dumps({"error": {**partial, **retried}}, ensure_ascii=False, allow_nan=False), err=True)
         raise typer.Exit(int(partial.get("exit_code") or 5))
 
 
@@ -130,7 +146,7 @@ def stations_cmd(
     def produce() -> dict:
         found = [] if refresh else pick(stations_mod.bundled())
         if not found:  # asked to, or nothing in the shipped list matches: Renfe's live list
-            with make_client() as client:
+            with _client() as client:
                 found = pick(stations_mod.load(client, refresh=refresh))
         return {"query": query, "count": len(found), "stations": [s.to_dict() for s in found]}
 
@@ -173,14 +189,14 @@ def search_cmd(
         hide_departed = after_time is None and today
         if hide_departed:  # don't list trains that have already left
             after_time = now.time().replace(second=0, microsecond=0)
-        with make_client() as client:
+        with _client() as client:
             src, dst = _stations(client, origin, destination)
             delays = live.in_background(client.transport) if today else None  # runs alongside the search
             out = search_mod.search(client, src, dst, day, names=_names(src, dst), after=after_time, fares=fares,
-                                    limit=limit)
+                                    limit=limit, now=now)
         if hide_departed and out["count"] == 0:
             _add_notice(out, f"No more trains today after {after_time.strftime('%H:%M')}; try --date tomorrow.")
-        board, why = delays() if delays else (None, None)
+        board, why, map_retries = delays() if delays else (None, None, [])
         try:
             live.annotate(out["trains"], board)
         except Exception as exc:  # the map never fails a search: a bug here leaves it without delays
@@ -189,6 +205,7 @@ def search_cmd(
         out["delays_included"] = board is not None
         if why:
             _add_notice(out, f"Delays are unknown ({why}).")
+        out["retries"] = client.retries + map_retries
         return out
 
     _emit(produce)
@@ -223,9 +240,9 @@ def status_cmd(
 
     def produce() -> dict:
         number = _train_number(train)
-        with make_client() as client:
-            board = live.fetch(transport=client.transport)
-        return live.status(board, number, _names())
+        with _client() as client:
+            board = live.fetch(transport=client.transport, retries=client.retries)
+        return live.status(board, number, _names(), client.retries)
 
     _emit(produce)
 
@@ -253,18 +270,22 @@ def watch_cmd(
     names, last, unreadable = _names(), None, 0
     deadline = _clock() + config.WATCH_LIMIT
     try:
-        with make_client() as client:
+        with _client() as client:
             while True:
+                retried: list[dict] = []  # this check's: not carried to later lines
                 try:
-                    now = live.status(live.fetch(transport=client.transport), number, names)
+                    now = live.status(live.fetch(transport=client.transport, retries=retried), number, names, retried)
                 except (UpstreamError, ApiShapeError) as err:  # a hiccup: one line per outage, and it keeps watching
                     unreadable = unreadable + 1 if isinstance(err, ApiShapeError) else 0
                     if unreadable >= config.WATCH_MAX_UNREADABLE:
+                        err.retries = retried
                         _fail(err)  # answer after answer isn't the map: it has moved or changed
                     if last is not _OUTAGE:
-                        _line({"train": number.zfill(5), "event": "map_unreachable", "error": err.to_dict()})
+                        _line({"train": number.zfill(5), "event": "map_unreachable", "error": err.to_dict(),
+                               "retries": retried})
                         last = _OUTAGE  # so the first answer after it prints a line, changed or not
                 except RenfeError as err:  # blocked or rate-limited: stop, as every command does
+                    err.retries = retried
                     _fail(err)
                 except Exception as exc:
                     _fail(RenfeError(f"unexpected internal error: {type(exc).__name__}"))
@@ -306,7 +327,7 @@ def open_cmd(
         wanted = _service_parts(train) if train is not None else None
         if train is not None and wanted is None:
             raise UsageError(f"--train must be a train number such as 03081 or 00601+00533 (got {train!r})")
-        with make_client() as client:
+        with _client() as client:
             src, dst = _stations(client, origin, destination)
             chosen, notices = None, []
             if wanted is not None:

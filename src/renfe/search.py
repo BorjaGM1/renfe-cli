@@ -251,21 +251,25 @@ def search(
     after: time | None = None,
     fares: bool = True,
     limit: int | None = None,
+    now: datetime | None = None,
 ) -> dict:
     """Trains from `origin` to `destination` on `day` (Madrid date), with fares for one adult. Before the
     cut-off they come from the legacy shop; if it fails, from the new system's partial list without fares,
-    with a notice. `after` keeps trains leaving at or after that local time."""
+    with a notice. `after` keeps trains leaving at or after that local time. `now` (aware), when given, lets an
+    empty legacy list for today count as the day being over (see below)."""
     names = names or {}
     notices: list[str] = []
     sold_here = day >= config.NSV_FIRST_SALE_DATE
-    trains, legacy_failure = None, None
+    trains, legacy_failure, legacy_empty = None, None, False
     if not sold_here:  # the legacy shop sells these dates, and lists every train with its fares
         try:
-            trains = legacy.trains(origin, destination, day, names, transport=client.transport)
+            trains = legacy.trains(origin, destination, day, names, transport=client.transport,
+                                   retries=client.retries)
         except RenfeError as err:
             legacy_failure = err.message
-        if trains == []:  # not trusted: an unknown station or a changed answer may look like this too
-            trains, legacy_failure = None, "it listed no trains"
+        # Not trusted: an unknown station or a changed answer may look like this too (checked below).
+        if trains == []:
+            trains, legacy_failure, legacy_empty = None, "it listed no trains", True
     from_legacy = trains is not None
     if trains is None:
         after_utc, before_utc = utc_window(day)
@@ -278,8 +282,16 @@ def search(
         trains, total = _timetable(doc, names)
         if total is not None and total > len(trains):
             notices.append(f"Renfe reported {total} trains but returned {len(trains)}; some may be missing.")
+    minute = now.replace(second=0, microsecond=0) if now is not None else None  # as the CLI's default `after`
+    leaving = minute is not None and any(datetime.fromisoformat(t["departure"]) >= minute for t in trains)
     if after:
         trains = [t for t in trains if datetime.fromisoformat(t["departure"]).time() >= after]
+    if legacy_empty and minute is not None and day == minute.date() and not leaving and not trains:
+        # The shop lists only trains that haven't left. Today, with nothing leaving from now on in the new system's
+        # list either, and nothing in the list shown, the day is over: nothing failed. Not on other days, and not
+        # when `after` keeps trains: before the cut-off the new system lists only part of the timetable, so a list
+        # from it needs the notice, and its being empty proves little.
+        legacy_failure = None
     trains.sort(key=lambda t: t["legs"][0]["_dep_utc"])
     if limit is not None:
         trains = trains[:limit]
