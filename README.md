@@ -179,6 +179,8 @@ scheduled departure and arrival for that stretch. A single train still counts on
 for example, `00632` ran from Zaragoza to Salamanca. `37632` covered Miranda de Ebro to Valladolid,
 and `37432` covered Valladolid to Salamanca. All three searches returned the same live report.
 The network totals still cover the whole map. `matched_trains` counts the rows returned by the filter.
+`schedule_matches` counts exact, linked, ambiguous, unmatched and unavailable schedules among the
+returned rows. Add `exact` and `linked` to get the number with scheduled departure and arrival times.
 
 Renfe's published groupings supply candidate numbers. The CLI checks active services on the run date,
 including when a train arrives after midnight. A shared stretch must have matching stations, direction

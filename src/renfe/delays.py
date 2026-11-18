@@ -202,4 +202,8 @@ def report(board: live.Board, names: dict[str, str], *, transport: httpx.BaseTra
         result["requested_train"] = wanted.zfill(5)
         result["trains"] = [row for row in rows if _matches(row, wanted)]
         result["matched_trains"] = len(result["trains"])
+    counts = dict.fromkeys(("exact", "linked", "ambiguous", "unmatched", "unavailable"), 0)
+    for row in result["trains"]:
+        counts[row["schedule_match"]] += 1
+    result["schedule_matches"] = counts
     return result

@@ -64,6 +64,7 @@ def test_lists_every_positive_delay_with_counts_and_one_shared_timetable(monkeyp
     assert [report[key] for key in ("mapped_trains", "delayed", "on_time", "early", "unknown")] == [6, 3, 1, 1, 1]
     assert report["map_updated"] == "2027-01-29T09:30:00+01:00" and report["notice"] is None
     assert report["retries"] == []
+    assert report["schedule_matches"] == {"exact": 1, "linked": 0, "ambiguous": 0, "unmatched": 2, "unavailable": 0}
     assert [row["train"] for row in report["trains"]] == ["00007", "00002", "03100"]
     missing, _, row = report["trains"]
     assert missing["schedule_match"] == "unmatched"
@@ -215,6 +216,7 @@ def test_live_and_ticket_numbers_find_the_same_row_with_verified_sections(monkey
         filtered = run(number)
         assert filtered["requested_train"] == number.zfill(5)
         assert (filtered["mapped_trains"], filtered["delayed"], filtered["matched_trains"]) == (2, 2, 1)
+        assert filtered["schedule_matches"]["exact"] == sum(filtered["schedule_matches"].values()) == 1
         assert filtered["trains"] == [row]
     assert len([r for r in fake.requests if str(r.url) == delays.TIMETABLE_URL]) == 1
     assert run("11111")["trains"][0]["number_segments"] == []  # Direct live number with no timetable.
