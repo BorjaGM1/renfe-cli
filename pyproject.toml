@@ -25,6 +25,11 @@ dependencies = [
 [project.scripts]
 renfe = "renfe.cli:main"
 
+[project.optional-dependencies]
+checkout = [
+    "playwright>=1.58,<2",
+]
+
 [build-system]
 requires = ["uv_build>=0.12.5,<0.13.0"]
 build-backend = "uv_build"

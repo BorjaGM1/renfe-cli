@@ -1,6 +1,6 @@
 """Links that continue a search on Renfe's website, where you pick the train and pay.
 
-The CLI never books or pays: it builds the link and, when asked, opens it in your browser. A link can't
+The open command builds the link and, when asked, opens it in your browser. A link can't
 select a train, so the page opens on that day's search and you choose the train there.
 """
 

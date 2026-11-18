@@ -91,10 +91,10 @@ def _station_key(station: Station) -> str:
     return f"{ADMIN},{station.code},{'null' if station.group else station.code}"
 
 
-def _open_results(http: httpx.Client, origin: Station, destination: Station, day: date) -> None:
-    """Steps 1-2: the www.renfe.com form, then the results page it redirects to."""
+def search_form(origin: Station, destination: Station, day: date) -> dict[str, str]:
+    """The one-way, one-adult search posted by both the CLI and browser checkout."""
     shown = day.strftime("%d/%m/%Y")
-    form = {
+    return {
         "tipoBusqueda": "autocomplete", "currenLocation": "menuBusqueda", "vengoderenfecom": "SI",
         "desOrigen": origin.name.upper(), "desDestino": destination.name.upper(),
         "cdgoOrigen": _station_key(origin), "cdgoDestino": _station_key(destination),
@@ -104,19 +104,28 @@ def _open_results(http: httpx.Client, origin: Station, destination: Station, day
         "conMascota": "false", "conBicicleta": "false", "asistencia": "false", "Idioma": "es", "Pais": "ES",
         "franjaHoraI": "", "franjaHoraV": "",
     }
-    label = "legacy shop search"
-    response = _send(http, "POST", SEARCH_URL, label, content=urlencode(form), headers={
-        "content-type": "application/x-www-form-urlencoded", "origin": WWW, "referer": f"{WWW}/"})
+
+
+def results_redirect(status: int, location: str) -> str:
+    """Accept only the results page of the legacy shop."""
     try:
-        results = urljoin(SEARCH_URL, response.headers.get("location", ""))
+        results = urljoin(SEARCH_URL, location)
         target = urlsplit(results)
-        where = (target.scheme, target.netloc, target.path)
-    except ValueError:  # a malformed Location
+        where = target.scheme, target.netloc, target.path
+    except ValueError:
         where = None
-    if response.status_code != 302 or where != ("https", "venta.renfe.com", RESULTS_PATH):
-        # Queue-it's waiting room or a challenge answers here, with a page or a redirect elsewhere
-        raise BlockedError(f"{label}: Renfe didn't send the search to its results page ({response.status_code}); "
-                           "a waiting room or bot protection?", status=response.status_code)
+    if status != 302 or where != ("https", "venta.renfe.com", RESULTS_PATH):
+        raise BlockedError(f"legacy shop search: Renfe didn't send the search to its results page ({status}); "
+                           "a waiting room or bot protection?", status=status)
+    return results
+
+
+def _open_results(http: httpx.Client, origin: Station, destination: Station, day: date) -> None:
+    """Steps 1-2: the www.renfe.com form, then the results page it redirects to."""
+    form = search_form(origin, destination, day)
+    response = _send(http, "POST", SEARCH_URL, "legacy shop search", content=urlencode(form), headers={
+        "content-type": "application/x-www-form-urlencoded", "origin": WWW, "referer": f"{WWW}/"})
+    results = results_redirect(response.status_code, response.headers.get("location", ""))
     label = "legacy shop results page"
     response = _send(http, "GET", results, label, headers={"referer": f"{WWW}/"})
     if response.status_code != 200 or "trainEnlacesManager" not in response.text:
