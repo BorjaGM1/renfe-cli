@@ -56,9 +56,34 @@ def test_search_no_fares(fake):
     assert "/browsing/journey/v1/orientations/journey-search" not in fake.paths()
 
 
+@pytest.mark.parametrize("day", ["2026-11-20", "2027-01-29"])
+def test_arrive_by_is_inclusive_and_applies_before_limit_and_fares(fake, day):
+    # The train at 07:00 arrives at noon. The train at 09:00 arrives first.
+    result = invoke("search", "Madrid", "Barcelona", "-d", day, "--after", "07:00", "--arrive-by", "11:40",
+                    "--limit", "1")
+    assert result.exit_code == 0, result.output
+    row, = json.loads(result.stdout)["trains"]
+    assert row["service"] == "03100" and row["fares"]
+    requests = [r for r in fake.requests if r.url.path == config.JOURNEY_SEARCH_PATH]
+    if day == "2027-01-29":
+        request, = requests
+        routes = json.loads(request.content)["travels"][0]["routes"]
+        assert [leg["service_name"] for route in routes for leg in route["legs"]] == ["03100"]
+    else:
+        assert not requests
+
+
+def test_arrival_deadline_can_exclude_every_train_even_when_trains_still_depart_today(fake):
+    result = invoke("search", "Madrid", "Barcelona", "--arrive-by", "10:00")
+    assert result.exit_code == 0, result.output
+    out = json.loads(result.stdout)
+    assert out["trains"] == [] and out["notice"] is None
+
+
 @pytest.mark.parametrize("args,needle", [
     (("search", "Madrid", "Barcelona", "--date", "29/01/2027"), "YYYY-MM-DD"),
     (("search", "Madrid", "Barcelona", "--after", "25:00"), "HH:MM"),
+    (("search", "Madrid", "Barcelona", "--arrive-by", "24:00"), "--arrive-by must be HH:MM"),
     (("search", "Narnia", "Barcelona"), "no station matches"),
     (("search", "Madrid", "MADRI"), "same station"),
 ])

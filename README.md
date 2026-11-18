@@ -23,7 +23,7 @@ shop, as a guest. No account, no browser to search, and JSON output. For trips o
 
 ```sh
 uv run renfe search Madrid Barcelona --date 2027-01-29
-uv run renfe search Atocha Sants -d tomorrow --after 17:00 --limit 5
+uv run renfe search Atocha Sants -d tomorrow --after 17:00 --arrive-by 22:00 --limit 5
 uv run renfe search MADRI BARCE -d 2027-02-05 --no-fares   # timetable only
 uv run renfe stations sevilla                             # find a station or its code
 uv run renfe open Madrid Barcelona -d 2027-01-29 --train 03081   # buy it on Renfe's website
@@ -107,6 +107,10 @@ Dates are YYYY-MM-DD, `today` or `tomorrow`, up to a year ahead. `search` return
 (`--limit`, up to 200). Fares cost one extra request per 3
 trains. For today, trains that have already left are hidden unless you pass `--after`; before 25 Jan 2027
 the legacy shop can leave them out anyway (see [Delays](#delays)).
+
+`--arrive-by HH:MM` keeps journeys scheduled to reach the destination by that time on the search date
+(Madrid time). An arrival exactly at the deadline qualifies. An arrival after midnight the next day falls
+outside the window. The filter applies before `--limit` and fare requests.
 
 Speed (measured 2026-11-15): a search takes about 0.3–0.5 s, and a full day of 22 trains with fares
 about 1.4 s. The anonymous session (a 30-minute token and the site's public API key) is kept in the

@@ -248,7 +248,8 @@ def test_watch_lines_carry_their_checks_retries(monkeypatch):
 # --- the empty day -----------------------------------------------------------------------------------------------
 
 
-def test_after_the_last_train_an_empty_day_isnt_a_failure(monkeypatch):
+@pytest.mark.parametrize("arrival", [[], ["--arrive-by", "20:00"]])
+def test_after_the_last_train_an_empty_day_isnt_a_failure(monkeypatch, arrival):
     """As on 18 Nov at 22:04: the legacy shop lists only trains that haven't left, and the new system has none
     leaving from now on either."""
     frozen_at(monkeypatch, "2026-11-15T23:30")
@@ -257,7 +258,7 @@ def test_after_the_last_train_an_empty_day_isnt_a_failure(monkeypatch):
         {"travel_duration": 165, "travel_path": [path("03400", "2026-11-15T21:30:00Z", "2026-11-16T00:15:00Z")]}]}
     use(monkeypatch, FakeRenfe(legacy_trains=[], **{config.SEARCH_TRAVEL_PATH: lambda r: httpx.Response(
         200, json=that_day)}))
-    out = json.loads(invoke("search", "Madrid", "Barcelona").stdout)
+    out = json.loads(invoke("search", "Madrid", "Barcelona", *arrival).stdout)
     assert out["count"] == 0 and out["notice"] == "No more trains today after 23:30; try --date tomorrow."
     assert out["fares_included"] is False  # nothing was priced
 
@@ -287,6 +288,17 @@ def test_an_empty_legacy_list_still_falls_back_when_the_new_system_list_is_shown
     out = json.loads(invoke("search", "Madrid", "Barcelona", *(["--after", after] if after else [])).stdout)
     assert out["count"] == listed and "failed (it listed no trains)" in out["notice"]
     assert "may be missing trains" in out["notice"] and out["fares_included"] is False
+
+
+@pytest.mark.parametrize("clock,departure", [("08:00", []), ("23:30", ["--after", "06:00"])])
+def test_arrival_deadline_keeps_the_legacy_fallback_notice(monkeypatch, clock, departure):
+    frozen_at(monkeypatch, f"2026-11-15T{clock}")
+    that_day = new_system_on("2026-11-15", "09:00")
+    use(monkeypatch, FakeRenfe(legacy_trains=[], **{config.SEARCH_TRAVEL_PATH: lambda r: httpx.Response(200, json=that_day)}))
+    result = invoke("search", "Madrid", "Barcelona", "--arrive-by", "10:00", *departure)
+    assert result.exit_code == 0, result.output
+    out = json.loads(result.stdout)
+    assert out["trains"] == [] and "may be missing trains" in out["notice"] and "No more trains" not in out["notice"]
 
 
 @pytest.mark.parametrize("date", ["today", "2026-11-20"])

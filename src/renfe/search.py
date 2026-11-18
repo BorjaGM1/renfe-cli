@@ -249,14 +249,17 @@ def search(
     *,
     names: dict[str, str] | None = None,
     after: time | None = None,
+    arrive_by: time | None = None,
     fares: bool = True,
     limit: int | None = None,
     now: datetime | None = None,
+    from_now: bool = False,
 ) -> dict:
     """Trains from `origin` to `destination` on `day` (Madrid date), with fares for one adult. Before the
     cut-off they come from the legacy shop; if it fails, from the new system's partial list without fares,
     with a notice. `after` keeps trains leaving at or after that local time. `now` (aware), when given, lets an
-    empty legacy list for today count as the day being over (see below)."""
+    empty legacy list for today count as the day being over (see below). The CLI sets `from_now` for today
+    without an explicit departure time. `arrive_by` is an inclusive deadline on the search date in Madrid."""
     names = names or {}
     notices: list[str] = []
     sold_here = day >= config.NSV_FIRST_SALE_DATE
@@ -284,6 +287,8 @@ def search(
             notices.append(f"Renfe reported {total} trains but returned {len(trains)}; some may be missing.")
     minute = now.replace(second=0, microsecond=0) if now is not None else None  # as the CLI's default `after`
     leaving = minute is not None and any(datetime.fromisoformat(t["departure"]) >= minute for t in trains)
+    if from_now and minute is not None:
+        after = minute.time()
     if after:
         trains = [t for t in trains if datetime.fromisoformat(t["departure"]).time() >= after]
     if legacy_empty and minute is not None and day == minute.date() and not leaving and not trains:
@@ -292,6 +297,11 @@ def search(
         # when `after` keeps trains: before the cut-off the new system lists only part of the timetable, so a list
         # from it needs the notice, and its being empty proves little.
         legacy_failure = None
+    # Both end-of-day checks describe departures, before the arrival deadline can hide any of them.
+    no_more_departures = from_now and not trains
+    if arrive_by is not None:
+        deadline = datetime.combine(day, arrive_by, MADRID)
+        trains = [t for t in trains if datetime.fromisoformat(t["arrival"]) <= deadline]
     trains.sort(key=lambda t: t["legs"][0]["_dep_utc"])
     if limit is not None:
         trains = trains[:limit]
@@ -333,6 +343,9 @@ def search(
                        f"{config.NSV_FIRST_SALE_DATE.isoformat()}, failed ({legacy_failure}), so this list is from "
                        f"Renfe's new system: {'no fares, and ' if fares else ''}it may be missing trains. "
                        "`shop.url` opens the full list on Renfe's website.")
+
+    if no_more_departures and after is not None:
+        notices.append(f"No more trains today after {after:%H:%M}; try --date tomorrow.")
 
     for train in trains:
         for leg in train["legs"]:

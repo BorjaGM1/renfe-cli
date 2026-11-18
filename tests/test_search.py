@@ -98,6 +98,15 @@ def test_after_and_limit():
 
 
 
+@pytest.mark.parametrize("day", [date(2026, 11, 20), date(2027, 1, 29)])
+def test_arrive_by_excludes_next_day_arrivals_and_skips_empty_fare_batches(day):
+    overnight = {"travel_duration": 165, "travel_path": [path("03400", "2027-01-29T21:30:00Z", "2027-01-30T00:15:00Z")]}
+    fake = FakeRenfe(**{config.SEARCH_TRAVEL_PATH: lambda r: httpx.Response(200, json={"travel_options": [overnight]})})
+    out = run(fake, day=day, after=time(22), arrive_by=time(23, 59))
+    assert out["count"] == 0 and out["notice"] is None
+    assert not bodies(fake, config.JOURNEY_SEARCH_PATH)
+
+
 @pytest.mark.parametrize("doc", [{}, {"travel_options": None}, {"travel_options": [{"travel_path": []}]},
                                  {"travel_options": [{"travel_path": [{"service_name": "1"}]}]}])
 def test_search_travel_shape_errors(doc):

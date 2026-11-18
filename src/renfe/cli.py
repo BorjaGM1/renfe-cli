@@ -108,11 +108,11 @@ def _parse_date(text: str) -> date:
     return day
 
 
-def _parse_time(text: str | None) -> time | None:
+def _parse_time(text: str | None, option: str) -> time | None:
     if text is None:
         return None
     if not re.fullmatch(r"([01]?\d|2[0-3]):[0-5]\d", text.strip()):
-        raise UsageError(f"--after must be HH:MM (got {text!r})")
+        raise UsageError(f"{option} must be HH:MM (got {text!r})")
     hours, minutes = text.strip().split(":")
     return time(int(hours), int(minutes))
 
@@ -180,6 +180,8 @@ def search_cmd(
     date_: Annotated[str, typer.Option("--date", "-d", help="Travel date: YYYY-MM-DD, today or tomorrow.")] = "today",
     after: Annotated[str | None, typer.Option(
         help="Only trains leaving at or after HH:MM, local time (today: defaults to now).")] = None,
+    arrive_by: Annotated[str | None, typer.Option(
+        help="Only trains scheduled to arrive by HH:MM on the search date, Madrid time.")] = None,
     fares: Annotated[bool, typer.Option(help="Also fetch fares (one extra request per 3 trains).")] = True,
     limit: Annotated[int, typer.Option(min=1, max=200, help="Most trains to return, earliest first.")] = 10,
 ) -> None:
@@ -187,19 +189,15 @@ def search_cmd(
     legacy shop). For today, also each train's live delay, from Renfe's live train map."""
 
     def produce() -> dict:
-        day, after_time = _parse_date(date_), _parse_time(after)
+        day, after_time = _parse_date(date_), _parse_time(after, "--after")
+        arrival_time = _parse_time(arrive_by, "--arrive-by")
         now = datetime.now(search_mod.MADRID)
         today = day == now.date()
-        hide_departed = after_time is None and today
-        if hide_departed:  # don't list trains that have already left
-            after_time = now.time().replace(second=0, microsecond=0)
         with _client() as client:
             src, dst = _stations(client, origin, destination)
             delays = live.in_background(client.transport) if today else None  # runs alongside the search
             out = search_mod.search(client, src, dst, day, names=_names(src, dst), after=after_time, fares=fares,
-                                    limit=limit, now=now)
-        if hide_departed and out["count"] == 0:
-            _add_notice(out, f"No more trains today after {after_time.strftime('%H:%M')}; try --date tomorrow.")
+                                    arrive_by=arrival_time, limit=limit, now=now, from_now=today and after_time is None)
         board, why, map_retries = delays() if delays else (None, None, [])
         try:
             live.annotate(out["trains"], board)
