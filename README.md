@@ -215,7 +215,7 @@ the timetable fails, the live result still prints with `schedule_match: "unavail
 When a ticket number is absent from the map but a published partner number is present, `renfe status TRAIN`
 checks the timetable for a matching section. A unique match includes the ticket number in `requested_train`
 and the live number in `train`, including for early and on-time trains. When several live trains match,
-`matching_trains` lists them and the delay is unknown. `renfe watch` takes the live number from `train`.
+`matching_trains` lists them and the delay is unknown.
 
 - **While it runs, and mainly long- and medium-distance trains.** The map lists trains around the time they
   run (some while still at their first station), and at night it is empty. A train that isn't on it has
@@ -266,7 +266,13 @@ output, on the first check and whenever the train's delay, its next station, the
 is the finer signal: on 18 Nov from 06:29 to 06:59 it moved 264 times with the delay and next station
 unchanged, mostly by a minute either way, and a train on the map throughout gave about 10 lines in those
 30 minutes (at most 15). It keeps checking a train that isn't on the map yet, so you can start it before
-departure. Each line has that check's `retries`, which don't count as a change. Two other lines carry an
+departure. A ticket number works too. When a published partner appears, the watch verifies its section
+against the timetable. Several matches produce a line listing `matching_trains`. Once one train matches,
+the watch follows its live number even if another partner appears later. The watch loads the timetable
+once at most and keeps polling the map if that load fails. Status lines carry the same schedule fields as
+`renfe status`. Ticket-number watches also include `requested_train` on event lines.
+
+Each status line has that check's `retries`, which don't count as a change. Two other lines carry an
 `event` instead: `map_unreachable` (with the `error` and `retries`) when the map stops answering, after its
 retries, once per outage, after which the next answer prints a line whether or not anything changed; and
 `ended` when the watch stops on its own. Pipe it into whatever pings you; the CLI sends no notifications

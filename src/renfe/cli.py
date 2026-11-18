@@ -276,7 +276,7 @@ def _line(payload: dict) -> None:
 
 @app.command("watch")
 def watch_cmd(
-    train: Annotated[str, typer.Argument(help="A train number from `renfe search`, e.g. 03081.")],
+    train: Annotated[str, typer.Argument(help="A live train number or a ticket number, e.g. 03081.")],
 ) -> None:
     """Check a train's live delay every 2 minutes. Prints one JSON line, shaped like `renfe status`, on the first
     check and whenever its delay, its next station or the expected arrival there, `overdue` (held past that
@@ -286,22 +286,23 @@ def watch_cmd(
         number = _train_number(train)
     except UsageError as err:
         _fail(err)
-    names, last, unreadable = _names(), None, 0
+    last, unreadable, last_matches = None, 0, None
     deadline = _clock() + config.WATCH_LIMIT
     try:
         with _client() as client:
+            watch = delays_mod.Watch(number, _names(), client.transport)
             while True:
                 retried: list[dict] = []  # this check's: not carried to later lines
                 try:
-                    now = live.status(live.fetch(transport=client.transport, retries=retried), number, names, retried)
-                    now.update(delays_mod.status_fields(number))
+                    board = live.fetch(transport=client.transport, retries=retried)
+                    now = watch.check(board, retried)
                 except (UpstreamError, ApiShapeError) as err:  # a hiccup: one line per outage, and it keeps watching
                     unreadable = unreadable + 1 if isinstance(err, ApiShapeError) else 0
                     if unreadable >= config.WATCH_MAX_UNREADABLE:
                         err.retries = retried
                         _fail(err)  # answer after answer isn't the map: it has moved or changed
                     if last is not _OUTAGE:
-                        _line({"train": number.zfill(5), "event": "map_unreachable", "error": err.to_dict(),
+                        _line({**watch.event_numbers(), "event": "map_unreachable", "error": err.to_dict(),
                                "retries": retried})
                         last = _OUTAGE  # so the first answer after it prints a line, changed or not
                 except RenfeError as err:  # blocked or rate-limited: stop, as every command does
@@ -314,12 +315,14 @@ def watch_cmd(
                     nxt = now["next_station"] or {}
                     seen = (now["on_map"], now["delay_minutes"], nxt.get("code"), nxt.get("expected_arrival"),
                             now["overdue"])
-                    if seen != last:
+                    matches = now.get("matching_trains")
+                    if seen != last or (matches and matches != last_matches):
                         _line(now)
                         last = seen
+                    last_matches = matches
                 left = deadline - _clock()
                 if left <= 0:
-                    _line({"train": number.zfill(5), "event": "ended",
+                    _line({**watch.event_numbers(), "event": "ended",
                            "message": f"watched for {config.WATCH_LIMIT / 3600:g} h; run it again to keep watching"})
                     return
                 _sleep(min(config.WATCH_INTERVAL, left))

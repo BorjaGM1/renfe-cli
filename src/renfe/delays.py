@@ -7,8 +7,9 @@ import time
 import zipfile
 import zlib
 from collections import defaultdict
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import date, timedelta
+from functools import partial
 from itertools import chain
 
 import httpx
@@ -119,27 +120,31 @@ def _download(transport: httpx.BaseTransport | None) -> bytes:
                             transient=retry.connection_failure(exc)) from None
 
 
-def _timetable(days: set[date], numbers: set[str], transport: httpx.BaseTransport | None, retries: list) -> Trips:
+def _timetable(days: set[date], numbers: set[str], transport: httpx.BaseTransport | None, retries: list,
+               *, single_attempt: bool = False) -> Trips:
     path = config.cache_dir() / "timetable.zip"
     try:
         if 0 <= time.time() - path.stat().st_mtime < _ONE_DAY.total_seconds():
             return _parse(path.read_bytes(), days, numbers)
     except (OSError, ApiShapeError):
         pass  # Refresh a missing or damaged cache.
-    content = retry.call("Renfe timetable", lambda: _download(transport), retries)
+    content = retry.call("Renfe timetable", lambda: _download(transport), retries, may_retry=lambda: not single_attempt)
     trips = _parse(content, days, numbers)
     cachefile.write_atomic(path, content)
     return trips
 
 
+type LoadTrips = Callable[[set[date], set[str]], Trips]
+
+
 def _scheduled_rows(board: live.Board, entries: list[dict], names: dict[str, str],
-                    transport: httpx.BaseTransport | None, retries: list[dict]) -> tuple[list[dict], str | None]:
+                    load: LoadTrips, *, unchecked: str | None = "unmatched") -> tuple[list[dict], str | None]:
     rows, references = [], {}
     for entry in entries:
         number = entry["number"]
         row = live.status(board, number, names)
         del row["retries"]  # All trains share the requests logged at the top level.
-        row.update(scheduled_departure=None, scheduled_arrival=None, schedule_match="unmatched", number_segments=[])
+        row.update(scheduled_departure=None, scheduled_arrival=None, schedule_match=unchecked, number_segments=[])
         rows.append(row)
         # The map has no service date. Undo the delay at the next stop to place the train in its
         # timetable window, including yesterday's late or overnight service.
@@ -151,7 +156,7 @@ def _scheduled_rows(board: live.Board, entries: list[dict], names: dict[str, str
         days = {day for moment in references.values() for day in train_numbers.service_days(moment)}
         numbers = train_numbers.timetable_numbers({live.key(n) for n in references})
         try:
-            trips = _timetable(days, numbers, transport, retries)
+            trips = load(days, numbers)
         except RenfeError as err:
             notice = err.message
             for row in rows:
@@ -167,7 +172,7 @@ def _matches(row: dict, wanted: str) -> bool:
     return live.key(row["train"]) == wanted or any(live.key(s["train"]) == wanted for s in row["number_segments"])
 
 
-def status_fields(number: str) -> dict:
+def _status_fields(number: str) -> dict:
     return {"requested_train": number.zfill(5), "scheduled_departure": None, "scheduled_arrival": None,
             "schedule_match": None, "number_segments": []}
 
@@ -175,16 +180,23 @@ def status_fields(number: str) -> dict:
 def status(board: live.Board, number: str, names: dict[str, str], *, transport: httpx.BaseTransport | None,
            retries: list[dict]) -> dict:
     wanted = live.key(number)
-    candidates = {wanted} if wanted in board.trains else train_numbers.timetable_numbers({wanted})
+    return _status(board, wanted, names, retries, train_numbers.timetable_numbers({wanted}),
+                   partial(_timetable, transport=transport, retries=retries))
+
+
+def _status(board: live.Board, wanted: str, names: dict[str, str], retries: list[dict],
+            candidates: set[str], load: LoadTrips) -> dict:
+    if wanted in board.trains:
+        candidates = {wanted}
     entries = [e for key, e in board.trains.items() if key in candidates]
-    rows, notice = _scheduled_rows(board, entries, names, transport, retries)
+    rows, notice = _scheduled_rows(board, entries, names, load, unchecked=None)
     matches = [r for r in rows if _matches(r, wanted)]
     if len(matches) == 1:
         result = {**matches[0], "requested_train": wanted.zfill(5), "retries": retries}
         if notice:
             result["notice"] = " ".join(part for part in (result["notice"], notice) if part)
         return result
-    result = {**live.status(board, wanted, names, retries), **status_fields(wanted)}
+    result = {**live.status(board, wanted, names, retries), **_status_fields(wanted)}
     if matches:
         result["schedule_match"] = "ambiguous"
         result["matching_trains"] = sorted(r["train"] for r in matches)
@@ -194,6 +206,49 @@ def status(board: live.Board, number: str, names: dict[str, str], *, transport: 
         result["notice"] += f" Ticket-number lookup unavailable. {notice}"
     result["retries"] = retries
     return result
+
+
+class Watch:
+    """Resolve a ticket against each new map until one train matches, then follow that number."""
+
+    def __init__(self, number: str, names: dict[str, str], transport: httpx.BaseTransport | None):
+        self.requested = live.key(number)
+        self.names, self.transport = names, transport
+        self.candidates = train_numbers.timetable_numbers({self.requested})
+        self.pinned: str | None = None
+        self.trips: Trips | None = None
+        self.timetable_error: str | None = None
+
+    def _load(self, days: set[date], _numbers: set[str], *, board: live.Board, retries: list[dict]) -> Trips:
+        if self.timetable_error:
+            raise RenfeError(self.timetable_error)
+        if self.trips is None:
+            # A later poll can see another peer or cross midnight during this 12-hour watch.
+            if board.updated:
+                days = days | train_numbers.service_days(board.updated)
+            days = days | {day + _ONE_DAY for day in days}
+            try:
+                self.trips = _timetable(days, train_numbers.timetable_numbers(self.candidates), self.transport,
+                                        retries, single_attempt=True)
+            except RenfeError as err:
+                self.timetable_error = err.message
+                raise
+        return self.trips
+
+    def check(self, board: live.Board, retries: list[dict]) -> dict:
+        number = self.pinned or self.requested
+        candidates = {self.pinned} if self.pinned is not None else self.candidates
+        row = _status(board, number, self.names, retries, candidates, partial(self._load, board=board, retries=retries))
+        if row["on_map"]:
+            self.pinned = live.key(row["train"])
+        row["requested_train"] = self.requested.zfill(5)
+        return row
+
+    def event_numbers(self) -> dict:
+        result = {"train": (self.pinned or self.requested).zfill(5)}
+        if self.pinned != self.requested and len(self.candidates) > 1:
+            result["requested_train"] = self.requested.zfill(5)
+        return result
 
 
 def report(board: live.Board, names: dict[str, str], *, transport: httpx.BaseTransport | None = None,
@@ -207,7 +262,7 @@ def report(board: live.Board, names: dict[str, str], *, transport: httpx.BaseTra
         wanted = live.key(train)
         candidates = train_numbers.timetable_numbers({wanted})
         entries = [e for e in entries if live.key(e["number"]) in candidates]
-    rows, notice = _scheduled_rows(board, entries, names, transport, retries)
+    rows, notice = _scheduled_rows(board, entries, names, partial(_timetable, transport=transport, retries=retries))
     result = {"map_updated": board.updated.isoformat() if board.updated else None,
               "mapped_trains": len(delays), "delayed": count, "on_time": delays.count(0),
               "early": sum(d is not None and d < 0 for d in delays), "unknown": delays.count(None),

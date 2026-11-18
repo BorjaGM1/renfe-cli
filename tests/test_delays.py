@@ -6,10 +6,11 @@ import httpx
 import pytest
 from typer.testing import CliRunner
 
-from renfe import cli, config, live
+from renfe import cli, config, live, train_numbers
+from renfe import delays as delay_report
 from renfe.delays import TIMETABLE_URL
 
-from fakes import FakeRenfe, live_map, map_train
+from fakes import FakeRenfe, live_map, map_train, timetable
 
 runner = CliRunner()
 
@@ -504,3 +505,71 @@ def test_watch_says_once_when_a_held_train_is_overdue_and_again_when_it_moves_on
     assert [(o["overdue"], o["next_station"]["code"]) for o in out] == [(False, "04040"), (True, "04040"),
                                                                         (False, "71801")]
     assert "has already passed" in out[1]["notice"]  # 10:36 is within the 5-minute grace; 10:38 isn't
+
+@pytest.fixture
+def watch_timetable(monkeypatch):
+    group = train_numbers.Group("60000", "71801", frozenset({"3100", "3000", "500"}))
+    monkeypatch.setattr(train_numbers, "_groups", lambda: {n: [group] for n in group.numbers})
+    trips = "\n".join(f"daily,{n},{n}" for n in group.numbers)
+    stops = "\n".join(f"{n},1,60000,,09:00:00\n{n},2,71801,12:00:00," for n in group.numbers)
+    return timetable(trips, stops, exceptions="daily,20270129,1\ndaily,20270130,1")
+
+
+def test_ticket_watch_waits_reports_ambiguity_once_then_pins(monkeypatch, watch_timetable):
+    def board(*numbers):
+        return live_map(*(map_train(n, 12, "60000", "04040", "2027-01-29T10:32:00") for n in numbers))
+
+    both = board("03100", "03000")
+    _, fake = watching(monkeypatch, [board(), both, both, board("03100"), board("00500"), httpx.ReadTimeout("timeout"),
+                                     board("03100", "00500")])
+    monkeypatch.setattr(config, "WATCH_LIMIT", 6 * 120)
+    fake.overrides[TIMETABLE_URL] = lambda r: httpx.Response(200, content=watch_timetable)
+    parsed = []
+    parse = delay_report._parse
+
+    def counted(*args):
+        parsed.append(True)
+        return parse(*args)
+
+    monkeypatch.setattr(delay_report, "_parse", counted)
+    result = invoke("watch", "500")
+    assert result.exit_code == 0, result.output
+    waiting, ambiguous, pinned, absent, outage, back, end = lines(result)
+    assert waiting["on_map"] is False and waiting["schedule_match"] is None
+    assert ambiguous["matching_trains"] == ["03000", "03100"] and ambiguous["schedule_match"] == "ambiguous"
+    assert pinned["on_map"] and pinned["train"] == "03100" and pinned["schedule_match"] == "exact"
+    assert pinned["scheduled_departure"][11:16] == "09:00" and pinned["scheduled_arrival"][11:16] == "12:00"
+    assert absent["train"] == "03100" and not absent["on_map"]
+    assert back == pinned and outage["event"] == "map_unreachable" and end["event"] == "ended"
+    assert outage["train"] == end["train"] == "03100"
+    assert all(row["requested_train"] == "00500" for row in lines(result))
+    assert [str(r.url) for r in fake.requests] == [config.LIVE_MAP_URL] * 2 + [TIMETABLE_URL] + [config.LIVE_MAP_URL] * 5
+    assert parsed == [True]
+
+
+def test_direct_watch_uses_its_number_and_cached_service_days(monkeypatch, watch_timetable):
+    def board(day):
+        stamp = f"2027-01-{day}T10:32:00"
+        return live_map(*(map_train(n, day, "60000", "04040", stamp, reported=stamp) for n in ("03100", "00500")),
+                        updated=stamp)
+
+    _, fake = watching(monkeypatch, [board(29), board(30)])
+    fake.overrides[TIMETABLE_URL] = lambda r: httpx.Response(200, content=watch_timetable)
+    monkeypatch.setattr(config, "WATCH_LIMIT", 120)
+    first, next_day, end = lines(invoke("watch", "3100"))
+    assert first["train"] == next_day["train"] == "03100"
+    assert [r["scheduled_arrival"][:10] for r in (first, next_day)] == ["2027-01-29", "2027-01-30"]
+    assert set(end) == {"train", "event", "message"}
+    assert [str(r.url) for r in fake.requests].count(TIMETABLE_URL) == 1
+
+
+@pytest.mark.parametrize("response", [httpx.Response(429), httpx.Response(503)])
+def test_watch_keeps_live_changes_after_one_failed_timetable_attempt(monkeypatch, response):
+    _, fake = watching(monkeypatch, [at(12), at(15), at(15)], stop_after=2)
+    fake.overrides[TIMETABLE_URL] = lambda r: response
+    result = invoke("watch", "3100")
+    assert result.exit_code == 0
+    rows = lines(result)
+    assert [r["delay_minutes"] for r in rows] == [12, 15]
+    assert all(r["schedule_match"] == "unavailable" and str(response.status_code) in r["notice"] for r in rows)
+    assert [str(r.url) for r in fake.requests].count(TIMETABLE_URL) == 1
