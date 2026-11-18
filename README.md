@@ -2,8 +2,9 @@
 
 Search Renfe trains and fares from the terminal. It talks directly to Renfe's own web API, the same
 anonymous way the website does before anyone signs in; for trips before 25 Jan 2027, to Renfe's legacy
-shop, as a guest. No account, no browser to search, and JSON output. To buy, it opens Renfe's website on
-your search.
+shop, as a guest. No account, no browser to search, and JSON output. For trips on the legacy shop,
+`renfe checkout` takes you through guest checkout in Chrome.
+`renfe open` opens either shop in your default browser.
 
 > Unofficial. Renfe's API is undocumented and can change without notice. The CLI sends what the
 > website sends, no more: one timetable call, then fares 3 trains per call with at most 3 calls in
@@ -40,7 +41,7 @@ pay.
 
 **Buying.** `renfe open FROM TO -d DATE` opens that page in your browser when run from a terminal
 (`--browser` forces it, `--no-browser` only prints the link). Add `--train` to check the train exists
-that day and show it, so you know which one to pick. The CLI never books or pays: a link can't select a train, so you pick it and pay on Renfe's page.
+that day and show it, so you know which one to pick. With `open`, you pick the train and pay on Renfe’s page.
 - **Dates before 25 Jan 2027:** www.renfe.com opens with the route and the date filled in. Mark
   "Solo ida" (or pick a return date) to enable "Buscar billetes"; it then searches Renfe's legacy shop.
 - **From 25 Jan 2027:** Renfe's new shop opens with the route filled in and one way selected. Pick the
@@ -48,6 +49,32 @@ that day and show it, so you know which one to pick. The CLI never books or pays
 - `--train` is checked against the full list (before 25 Jan 2027, the legacy shop's). If the legacy shop
   fails, the CLI sees only the new system's partial list, so a train it can't see still opens the page,
   with a `notice`.
+
+### Checkout with PayPal
+
+For travel before 25 January 2027, start a one-way checkout for one adult with installed Google Chrome.
+To test it, use review mode. It selects the method, reads Renfe’s recalculated total, then closes Chrome
+before payment. You enter real passenger details on Renfe to reach that screen.
+
+```sh
+uv run --extra checkout renfe checkout Madrid Barcelona -d tomorrow --review-only
+```
+
+To buy, omit `--review-only`. Add `--train 03081` to expand a specific service from your search.
+Choose your fare, enter the passenger details and review extras in the window that opens. At payment the
+CLI selects PayPal. You review the total, accept the terms, submit payment and approve it at PayPal.
+Keep that window open as PayPal returns you to Renfe.
+
+The command also accepts `--method card`, `bizum`, `google-pay` or `renfe-points` when Renfe offers
+that option. The capture covers method selection for these alternatives and the complete return for
+PayPal. For Apple Pay, open the search in Safari with `renfe open`. Renfe hides that option in Chrome.
+
+A review prints JSON with `status: reviewed`, `selected_method` and the displayed `total`. For a purchase,
+save your ticket and close the checkout window to finish the command. It reports `confirmed` when Renfe
+displays the booking locator and ticket download on its confirmation page. If you close the window
+earlier, it reports `unconfirmed`. If you already approved payment, check your confirmation email before
+trying again. Checkout uses a temporary Chrome profile and writes progress to stderr. Passenger and
+payment details stay out of CLI output.
 
 Dates are YYYY-MM-DD, `today` or `tomorrow`, up to a year ahead. `search` returns at most 10 trains by default
 (`--limit`, up to 200). Fares cost one extra request per 3
@@ -70,7 +97,7 @@ only from 25 Jan 2027 and before that knows only some trains (for Madrid–Barce
 same JSON (Madrid–Barcelona on Friday 27 Nov 2026, checked 2026-11-17: 24 trains, cheapest €31.15).
 There, `type_code` and `intermediate_stops` are `null`, and a train that isn't on sale (full, "not on
 sale at the moment", not running, or only wheelchair places left) has `available: false` and no fares.
-The CLI only searches there: it never selects a train or a fare.
+`renfe search` only reads the list. Start a booking separately with `renfe checkout`.
 
 If the legacy shop fails (a block or rate limit, a waiting room or challenge page, an answer the CLI
 can't read, or an empty list), you get the new system's partial list instead, without fares, and a
@@ -180,6 +207,7 @@ lines). Errors go to stderr as `{"error": {...}}`, with these exit codes:
 ```sh
 uv sync
 uv run pytest                      # offline: HTTP is mocked
+RENFE_TEST_CHROME=1 uv run --extra checkout pytest tests/test_checkout.py  # offline, installed Chrome
 RENFE_LIVE=1 uv run pytest -m live # about 10 real requests, plus one to the live map
 uv run python scripts/update_stations.py  # refresh the shipped station list; prints what changed
 ```

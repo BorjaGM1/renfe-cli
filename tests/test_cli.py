@@ -349,3 +349,24 @@ def test_open_from_a_terminal_opens_the_browser_by_default(fake, opened, monkeyp
     monkeypatch.setattr(cli, "_stdout_is_terminal", lambda: True)
     out = json.loads(invoke("open", "Madrid", "Barcelona", "-d", "2027-01-29").stdout)
     assert out["opened"] is True and opened == [out["shop"]["url"]]
+
+
+def test_checkout_uses_one_way_guest_flow(fake, monkeypatch):
+    calls = []
+
+    def checkout(src, dst, day, method, train, review_only, progress):
+        calls.append((src.code, dst.code, day.isoformat(), method.value, train, review_only))
+        return {"status": "reviewed", "selected_method": method.value, "total": "20.00 €"}
+
+    monkeypatch.setattr(cli.checkout_mod, "checkout", checkout)
+    result = invoke("checkout", "Madrid", "Barcelona", "-d", "tomorrow", "--train", "00601 + 00533", "--review-only")
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)["selected_method"] == "paypal"
+    assert calls == [("MADRI", "BARCE", "2026-11-16", "paypal", ["601", "533"], True)]
+    assert not fake.requests
+
+
+@pytest.mark.parametrize("opts", [["-d", "2027-01-25"], ["--train", "ABC"], ["--method", "unknown"]])
+def test_invalid_checkout_never_opens_browser(fake, opts):
+    assert invoke("checkout", "Madrid", "Barcelona", *opts).exit_code == 2
+    assert not fake.requests

@@ -17,15 +17,15 @@ try:  # Typer >= 0.29 vendors Click; older Typer uses the click package
 except ImportError:  # pragma: no cover
     from click import exceptions as click_exceptions
 
-from . import config, live, package_version, search as search_mod, shop as shop_mod, stations as stations_mod
+from . import checkout as checkout_mod, config, live, package_version, search as search_mod, shop as shop_mod, stations as stations_mod
 from .client import RsvClient
 from .errors import ApiShapeError, RenfeError, UpstreamError, UsageError
 from .output import render, render_error
 
 app = typer.Typer(
     name="renfe",
-    help="Search Renfe trains and fares over Renfe's own web API, then open Renfe's website to buy; follow a "
-         "train's live delay. No account needed. Output is JSON.",
+    help="Search Renfe trains and fares, follow live delays and buy tickets in a browser. "
+         "No account needed. Output is JSON.",
     no_args_is_help=True,
     add_completion=False,
     # Rich tracebacks print frame locals, which include the bearer and the api key.
@@ -299,7 +299,7 @@ def open_cmd(
         help="Open the link in your default browser. Default: only when run from a terminal, so scripts "
              "and agents get the link without a browser popping up.")] = None,
 ) -> None:
-    """Open Renfe's website on this search, to pick the train and pay there. The CLI never books or pays."""
+    """Open Renfe's website on this search, to pick the train and pay there."""
 
     def produce() -> dict:
         day = _parse_date(date_)
@@ -330,6 +330,32 @@ def open_cmd(
         opened = shop_mod.open_in_browser(page["url"]) if launch else False
         return {"date": day.isoformat(), "origin": src.to_dict(), "destination": dst.to_dict(),
                 "train": chosen, "notice": " ".join(notices) or None, "shop": page, "opened": opened}
+
+    _emit(produce)
+
+
+@app.command("checkout")
+def checkout_cmd(
+    origin: Annotated[str, typer.Argument(help="Departure station or code.")],
+    destination: Annotated[str, typer.Argument(help="Arrival station or code.")],
+    date_: Annotated[str, typer.Option("--date", "-d", help="Travel date.")] = "today",
+    train: Annotated[str | None, typer.Option("--train", "-t", help="Expand this train to choose its fare.")] = None,
+    method: Annotated[checkout_mod.Method, typer.Option(
+        help="Payment method to select on Renfe.")] = checkout_mod.Method.paypal,
+    review_only: Annotated[bool, typer.Option(help="Stop after selecting the method, before payment.")] = False,
+) -> None:
+    """Start a one-way guest checkout in Chrome. Review the total and authorize payment in the browser."""
+    def produce() -> dict:
+        day = _parse_date(date_)
+        if day >= config.NSV_FIRST_SALE_DATE:
+            raise UsageError(f"Checkout supports the legacy shop for trips before {config.NSV_FIRST_SALE_DATE}. "
+                             "Use `renfe open` for this date.")
+        parts = _service_parts(train) if train is not None else None
+        if train is not None and parts is None:
+            raise UsageError("--train must be a train number or a sequence such as 00601+00533")
+        with make_client() as client:
+            src, dst = _stations(client, origin, destination)
+        return checkout_mod.checkout(src, dst, day, method, parts, review_only, lambda msg: typer.echo(msg, err=True))
 
     _emit(produce)
 
