@@ -52,6 +52,11 @@ def test_find_orders_best_first():
     assert [s.code for s in stations.find("madrid", EVERY)][:2] == ["MADRI", "60000"]
 
 
+def test_suggestions_ignore_short_query_words():
+    assert stations.suggestions("de") == []
+    assert stations.suggestions("de Mdrid") == stations.suggestions("Mdrid")
+
+
 def test_parse_rejects_bad_shapes():
     with pytest.raises(ApiShapeError):
         stations.parse({"not": "a list"})

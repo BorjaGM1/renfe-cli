@@ -276,15 +276,18 @@ def _line(payload: dict) -> None:
 def watch_cmd(
     train: Annotated[str, typer.Argument(help="A live train number or a ticket number, e.g. 03081.")],
 ) -> None:
-    """Check a train's live delay every 2 minutes. Prints one JSON line, shaped like `renfe status`, on the first
-    check and whenever its delay, its next station or the expected arrival there, `overdue` (held past that
-    arrival) or its being on the map changes; an `event` line when the map stops answering and when the watch
-    ends. Ends after 12 hours, or on Ctrl-C."""
+    """Check a live or ticket number every 2 minutes. Print a JSON line shaped like `renfe status` on the first
+    check and whenever the train's delay, next station, expected arrival there, overdue flag or presence changes.
+    A ticket lookup lists multiple verified partners in `matching_trains`. If the timetable fails, a line
+    explains why partner lookup is unavailable for the rest of the watch. If the requested number appears
+    after a partner, print its status and follow it. Events report map outages and the 12-hour time limit.
+    Press Ctrl-C to stop early."""
     try:
         number = _train_number(train)
     except UsageError as err:
         _fail(err)
     last, unreadable, last_matches = None, 0, None
+    reported_unavailable = False
     deadline = _clock() + config.WATCH_LIMIT
     try:
         with _client() as client:
@@ -293,6 +296,7 @@ def watch_cmd(
                 retried: list[dict] = []  # this check's: not carried to later lines
                 try:
                     board = live.fetch(transport=client.transport, retries=retried)
+                    previous_pin = watch.pinned
                     now = watch.check(board, retried)
                 except (UpstreamError, ApiShapeError) as err:  # a hiccup: one line per outage, and it keeps watching
                     unreadable = unreadable + 1 if isinstance(err, ApiShapeError) else 0
@@ -314,10 +318,15 @@ def watch_cmd(
                     seen = (now["on_map"], now["delay_minutes"], nxt.get("code"), nxt.get("expected_arrival"),
                             now["overdue"])
                     matches = now.get("matching_trains")
-                    if seen != last or (matches and matches != last_matches):
+                    unavailable = now["schedule_match"] == "unavailable"
+                    if (seen != last or watch.pinned != previous_pin or (matches and matches != last_matches)
+                            or (unavailable and not reported_unavailable)):
                         _line(now)
                         last = seen
-                    last_matches = matches
+                        if matches:
+                            last_matches = matches
+                        if unavailable:
+                            reported_unavailable = True
                 left = deadline - _clock()
                 if left <= 0:
                     _line({**watch.event_numbers(), "event": "ended",

@@ -140,7 +140,7 @@ def find(query: str, stations: list[Station], limit: int = 20) -> list[Station]:
 
 def suggestions(query: str) -> list[Station]:
     """Nearby spellings in the shipped list. These are hints, never resolved station choices."""
-    tokens = _norm(query).split()
+    tokens = [token for token in _norm(query).split() if len(token) >= 3]
     if not tokens:
         return []
 

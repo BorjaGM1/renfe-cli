@@ -271,10 +271,14 @@ is the finer signal: on 18 Nov from 06:29 to 06:59 it moved 264 times with the d
 unchanged, mostly by a minute either way, and a train on the map throughout gave about 10 lines in those
 30 minutes (at most 15). It keeps checking a train that isn't on the map yet, so you can start it before
 departure. A ticket number works too. When a published partner appears, the watch verifies its section
-against the timetable. Several matches produce a line listing `matching_trains`. Once one train matches,
-the watch follows its live number even if another partner appears later. The watch loads the timetable
-once at most and keeps polling the map if that load fails. Status lines carry the same schedule fields as
-`renfe status`. Ticket-number watches also include `requested_train` on event lines.
+against the timetable. Several matches produce a line listing `matching_trains`. Once one partner matches,
+the watch follows it even if another partner appears later. If the exact number you requested appears, the
+watch prints its status and follows that number for the rest of the watch.
+
+The watch loads the timetable at most once. If that load fails during ticket lookup, one line gives the
+reason. The watch can still follow the exact number on the map, but it cannot match the ticket to a partner
+for the rest of that watch. Status lines carry the same schedule fields as `renfe status`. Event lines
+include `requested_train` only while the watch is following a different live number.
 
 Each status line has that check's `retries`, which don't count as a change. Two other lines carry an
 `event` instead: `map_unreachable` (with the `error` and `retries`) when the map stops answering, after its

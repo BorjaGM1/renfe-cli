@@ -520,9 +520,10 @@ def test_ticket_watch_waits_reports_ambiguity_once_then_pins(monkeypatch, watch_
         return live_map(*(map_train(n, 12, "60000", "04040", "2027-01-29T10:32:00") for n in numbers))
 
     both = board("03100", "03000")
-    _, fake = watching(monkeypatch, [board(), both, both, board("03100"), board("00500"), httpx.ReadTimeout("timeout"),
-                                     board("03100", "00500")])
-    monkeypatch.setattr(config, "WATCH_LIMIT", 6 * 120)
+    maps = [board(), both, board(), both, board("03100"), board("03000"), httpx.ReadTimeout("timeout"),
+            board("03100", "03000")]
+    _, fake = watching(monkeypatch, maps)
+    monkeypatch.setattr(config, "WATCH_LIMIT", (len(maps) - 1) * 120)
     fake.overrides[TIMETABLE_URL] = lambda r: httpx.Response(200, content=watch_timetable)
     parsed = []
     parse = delay_report._parse
@@ -543,8 +544,43 @@ def test_ticket_watch_waits_reports_ambiguity_once_then_pins(monkeypatch, watch_
     assert back == pinned and outage["event"] == "map_unreachable" and end["event"] == "ended"
     assert outage["train"] == end["train"] == "03100"
     assert all(row["requested_train"] == "00500" for row in lines(result))
-    assert [str(r.url) for r in fake.requests] == [config.LIVE_MAP_URL] * 2 + [TIMETABLE_URL] + [config.LIVE_MAP_URL] * 5
+    assert [str(r.url) for r in fake.requests] == [config.LIVE_MAP_URL] * 2 + [TIMETABLE_URL] + [config.LIVE_MAP_URL] * 6
     assert parsed == [True]
+
+
+def test_watch_switches_from_a_peer_to_the_exact_number_then_keeps_it(monkeypatch, watch_timetable):
+    timeout = httpx.ReadTimeout("timeout")
+    both = live_map(map_train("03000", 20, "60000", "04040", "2027-01-29T10:32:00"),
+                    map_train("03100", 12, "60000", "04040", "2027-01-29T10:32:00"))
+    maps = [timeout, at(12, number="03000"), both, at(25), timeout, at(30, number="03000")]
+    _, fake = watching(monkeypatch, maps)
+    fake.overrides[TIMETABLE_URL] = lambda r: httpx.Response(200, content=watch_timetable)
+    monkeypatch.setattr(config, "WATCH_LIMIT", (len(maps) - 1) * 120)
+    result = invoke("watch", "3100")
+    assert result.exit_code == 0, result.output
+    first_outage, peer, exact, later, second_outage, absent, end = lines(result)
+    assert [(r["train"], r["delay_minutes"]) for r in (peer, exact, later, absent)] == [
+        ("03000", 12), ("03100", 12), ("03100", 25), ("03100", None)]
+    assert not absent["on_map"]
+    assert all(r["requested_train"] == "03100" for r in (peer, exact, later, absent))
+    assert [r["event"] for r in (first_outage, second_outage, end)] == ["map_unreachable", "map_unreachable", "ended"]
+    assert all(r["train"] == "03100" and "requested_train" not in r for r in (first_outage, second_outage, end))
+
+
+@pytest.mark.parametrize("code", [403, 503])
+def test_ticket_watch_reports_one_failed_timetable_attempt_then_waits_for_the_exact_number(monkeypatch, watch_timetable, code):
+    maps = [live_map(), at(12), at(20), live_map(), at(30), at(5, number="00500")]
+    _, fake = watching(monkeypatch, maps, stop_after=len(maps) - 1)
+    fake.overrides[TIMETABLE_URL] = lambda r: httpx.Response(code)
+    result = invoke("watch", "500")
+    assert result.exit_code == 0, result.output
+    waiting, failed, direct = lines(result)
+    assert not waiting["on_map"] and waiting["schedule_match"] is None
+    assert not failed["on_map"] and failed["delay_minutes"] is None and failed["schedule_match"] == "unavailable"
+    assert "rest of this watch" in failed["notice"] and str(code) in failed["notice"]
+    assert direct["on_map"] and direct["delay_minutes"] == 5
+    assert all(r["train"] == r["requested_train"] == "00500" for r in (waiting, failed, direct))
+    assert [str(r.url) for r in fake.requests].count(TIMETABLE_URL) == 1
 
 
 def test_direct_watch_uses_its_number_and_cached_service_days(monkeypatch, watch_timetable):

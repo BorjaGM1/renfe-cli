@@ -209,7 +209,7 @@ def _status(board: live.Board, wanted: str, names: dict[str, str], retries: list
 
 
 class Watch:
-    """Resolve a ticket against each new map until one train matches, then follow that number."""
+    """Follow the requested number when it appears. Until then, follow at most one verified partner."""
 
     def __init__(self, number: str, names: dict[str, str], transport: httpx.BaseTransport | None):
         self.requested = live.key(number)
@@ -236,17 +236,21 @@ class Watch:
         return self.trips
 
     def check(self, board: live.Board, retries: list[dict]) -> dict:
+        if self.requested in board.trains:
+            self.pinned = self.requested
         number = self.pinned or self.requested
         candidates = {self.pinned} if self.pinned is not None else self.candidates
         row = _status(board, number, self.names, retries, candidates, partial(self._load, board=board, retries=retries))
         if row["on_map"]:
             self.pinned = live.key(row["train"])
+        elif row["schedule_match"] == "unavailable":
+            row["notice"] += " The ticket number cannot be matched to a partner for the rest of this watch."
         row["requested_train"] = self.requested.zfill(5)
         return row
 
     def event_numbers(self) -> dict:
         result = {"train": (self.pinned or self.requested).zfill(5)}
-        if self.pinned != self.requested and len(self.candidates) > 1:
+        if self.pinned is not None and self.pinned != self.requested:
             result["requested_train"] = self.requested.zfill(5)
         return result
 
