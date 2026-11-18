@@ -15,8 +15,9 @@ shop, as a guest. No account, no browser to search, and JSON output. For trips o
 > output's `retries`; one of those 3 tries can be the resend when Renfe rejects a saved session with 401
 > (see below). An HTML page at any status is taken for bot protection and tried once; so are a block, a
 > rate limit and a timeout. The legacy shop has its own rule (below).
-> Live delays (`status`, `watch`, and `search` for today) come from a second host the website's search never
-> calls: Renfe's public live train map, one request per check (see [Delays](#delays)).
+> Live delays come from Renfe's public live train map. The network-wide
+> `delays` command also downloads Renfe's public timetable when it needs to look up scheduled times.
+> [Delays](#delays)
 
 ## Use
 
@@ -26,6 +27,7 @@ uv run renfe search Atocha Sants -d tomorrow --after 17:00 --limit 5
 uv run renfe search MADRI BARCE -d 2027-02-05 --no-fares   # timetable only
 uv run renfe stations sevilla                             # find a station or its code
 uv run renfe open Madrid Barcelona -d 2027-01-29 --train 03081   # buy it on Renfe's website
+uv run renfe delays                                       # delayed trains, with scheduled endpoint times
 uv run renfe status 03081                                 # that train's live delay and next station
 uv run renfe watch 03081                                  # a JSON line each time that changes
 ```
@@ -156,6 +158,28 @@ current list, in case the station is newer than the shipped one; that list is ke
 
 ## Delays
 
+`renfe delays` lists every train reporting a positive delay on Renfe's live long- and medium-distance
+map, most delayed first. Each entry in `trains` includes `delay_minutes`, the `origin` and
+`destination`, and the times the train was due to **leave its origin** (`scheduled_departure`)
+and **reach its destination** (`scheduled_arrival`). Both times include the local date and Madrid
+UTC offset. The live prediction for the next stop is a separate field, `next_station.expected_arrival`.
+`map_updated` dates the snapshot. The counts `delayed`, `on_time`, `early`, and `unknown` add up
+to `mapped_trains`, including when the map is empty.
+
+The command fetches one map for the whole report and looks up all the schedules in a single public GTFS
+timetable, cached for 24 hours. Any retried requests appear in the top-level `retries` list.
+It checks the service calendar, including dated exceptions, and
+uses the reported delay and live time to identify the run around midnight. [Renfe's timetable](https://data.renfe.com/es/dataset/horarios-de-alta-velocidad-larga-distancia-y-media-distancia)
+
+- `schedule_match: exact` means the train number and both stations match one set of scheduled times.
+- `linked` means Renfe lists the journey under two numbers. The CLI checks the dated timetable for
+  both legs at their junction and includes the numbers in `schedule_trains`. It recognizes the Bilbao
+  to Madrid and Figueres to Alicante pairings. [Renfe's service-number list](https://grupo.renfe.com/content/dam/grupo-renfe/sala-de-prensa/sala-de-prensa/general/pdf-y-otros/Trenes%2017%20noviembre%20SC.pdf)
+- `unmatched` means no schedule fit. `ambiguous` means several different times fit. In both cases
+  the train stays in the list with both scheduled times set to `null`.
+- If the timetable fails, `schedule_match` is `unavailable` and the top-level `notice` explains why.
+  The live report still exits successfully. If the live map itself fails, the command reports an error.
+
 `renfe status TRAIN` shows a train's live delay from Renfe's live train map, the public JSON behind its map
 page (`tiempo-real.largorecorrido.renfe.com`, no key or session). TRAIN is a number from `renfe search`
 (`03081`, leading zeros optional); for a train with a change, one leg's number. It returns
@@ -175,7 +199,8 @@ so it doesn't show how fresh they are.
   waiting for its time. After midnight the map can date that arrival a day ahead; `status` brings it back.
 - **Whichever run is on the map.** The map has no run date, so after midnight `status` and `watch` can show
   yesterday's run of a train that runs again today, still going (on 18 Nov at 02:14, 18135 of the 17th, 170
-  minutes late). Only `search` guards against that (below).
+  minutes late). `delays` looks up the service day for that run. `search` checks whether the entry
+  fits the requested journey (below).
 - **Unreachable at times.** On 17 Nov 2026 it refused connections from Spain for over two hours while it
   answered from other countries. On 18 Nov, checked every 15 minutes from 12:24 to 22:04, it answered every
   time but once, when it dropped connections for under a minute (4 requests failed over about 10 seconds,
@@ -248,7 +273,7 @@ lines). Errors go to stderr as `{"error": {...}}`, with these exit codes:
 | `1` | internal error (only the exception type is shown) |
 | `2` | usage: bad arguments, unknown station, bad date, or a request Renfe rejected |
 | `3` | auth: Renfe refused the anonymous session |
-| `5` | blocked or upstream: 403/429, a bot page, timeout or 5xx, including Renfe's live map for `status` (for `watch`, only a block or rate limit). If this happens while fetching fares, stdout still has the timetable (plus `fares_error`). On the legacy shop it falls back instead (exit 0, `notice`) |
+| `5` | blocked or upstream: 403/429, a bot page, timeout or 5xx, including Renfe's live map for `delays` and `status` (for `watch`, only a block or rate limit). If this happens while fetching fares, stdout still has the timetable (plus `fares_error`). On the legacy shop it falls back instead (exit 0, `notice`) |
 | `7` | API changed |
 
 ## Develop
