@@ -354,14 +354,17 @@ def open_cmd(
                 if found["notice"]:
                     notices.append(found["notice"])
                 if chosen is None and not found["notice"]:
-                    raise UsageError(f"no train {train} from {src.name} to {dst.name} on {day.isoformat()}; "
-                                     "`renfe search` lists them")
+                    message = f"no train {train} from {src.name} to {dst.name} on {day.isoformat()}; `renfe search` lists them"
+                    if day == datetime.now(search_mod.MADRID).date() and day < config.NSV_FIRST_SALE_DATE:
+                        message += ". The legacy shop stops listing a train after it leaves the searched station."
+                    raise UsageError(message)
                 if chosen is None:
                     notices.append(f"Train {train} isn't in the list this CLI can see for {day.isoformat()}, "
                                    "which is incomplete; look for it on Renfe's page.")
                 elif datetime.fromisoformat(chosen["departure"]) < datetime.now(search_mod.MADRID):
-                    notices.append(f"Train {chosen['service']} has already left "
-                                   f"({chosen['departure'][11:16]}).")
+                    first_leg = chosen["service"].split("+")[0].strip()
+                    notices.append(f"Train {chosen['service']} was scheduled to leave at {chosen['departure'][11:16]}, "
+                                   f"which has passed. Check `renfe status {first_leg}` for its reported delay.")
         page = shop_mod.link(src, dst, day)
         launch = _stdout_is_terminal() if browser is None else browser  # scripts and agents: link only
         opened = shop_mod.open_in_browser(page["url"]) if launch else False

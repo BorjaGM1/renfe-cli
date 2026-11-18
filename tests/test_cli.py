@@ -294,8 +294,7 @@ def test_open_unknown_train_when_renfe_says_the_list_is_short(monkeypatch, tmp_p
     assert "reported 9 trains" in out["notice"] and "isn't in the list" in out["notice"] and len(opened) == 1
 
 
-def test_open_today_says_when_the_train_already_left(fake, opened, monkeypatch):
-    """Frozen "now" is 2026-11-15 10:00 Madrid; train 03100 leaves at 09:00 local."""
+def test_open_today_reports_the_scheduled_departure(fake, opened, monkeypatch):
     from datetime import datetime as real_datetime
 
     from renfe import search as search_mod
@@ -307,7 +306,23 @@ def test_open_today_says_when_the_train_already_left(fake, opened, monkeypatch):
 
     monkeypatch.setattr(cli, "datetime", LaterThatDay)
     out = json.loads(invoke("open", "Madrid", "Barcelona", "-d", "today", "--train", "03100").stdout)
-    assert out["train"]["service"] == "03100" and "already left (09:00)" in out["notice"]
+    assert out["train"]["service"] == "03100" and "was scheduled to leave at 09:00" in out["notice"]
+    assert "renfe status 03100" in out["notice"] and not fake.live_requests()
+
+
+def test_open_explains_a_missing_train_on_todays_legacy_list(fake, monkeypatch):
+    from datetime import datetime
+
+    class LegacyDay(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 11, 20, 12, 0, tzinfo=tz)
+
+    monkeypatch.setattr(cli, "datetime", LegacyDay)
+    result = invoke("open", "Madrid", "Barcelona", "--train", "00500", "--no-browser")
+    assert result.exit_code == 2
+    assert "after it leaves the searched station" in json.loads(result.stderr)["error"]["message"]
+    assert not fake.live_requests()
 
 
 def test_open_same_station_is_a_usage_error(fake, opened):
