@@ -154,6 +154,8 @@ Stations are matched by name, ignoring accents and case, or by code. A city name
 all of that city's stations (`MADRI`). Renfe's list of about 1,400 stations ships with the CLI, so
 finding one sends no request. Only a name that matches none of them makes the CLI ask Renfe for its
 current list, in case the station is newer than the shipped one; that list is kept for a day.
+If neither list matches, `stations` returns up to five spelling suggestions from the shipped list.
+For example, `renfe stations Chamartn` suggests Madrid-Chamartín. Use its code or corrected name to search.
 `renfe stations --refresh` asks Renfe directly. The cache folder is `~/.cache/renfe-cli`, or
 `$XDG_CACHE_HOME/renfe-cli`, or `$RENFE_CACHE_DIR` if set.
 

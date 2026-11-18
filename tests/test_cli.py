@@ -411,3 +411,14 @@ def test_apple_pay_unavailable_reports_no_handoff(fake, monkeypatch):
     monkeypatch.setattr(cli.shop_mod, "open_in_safari", lambda url: False)
     result = invoke("checkout", "Madrid", "Barcelona", "--method", "apple-pay")
     assert result.exit_code == 2 and not result.stdout
+
+
+def test_typo_suggestions_are_separate_from_real_stations(fake):
+    out = json.loads(invoke("stations", "Mdrid").stdout)
+    assert out["count"] == 0 and out["stations"] == []
+    assert [s["code"] for s in out["suggestions"]][:2] == ["MADRI", "60000"]
+    assert fake.paths().count(config.STATIONS_PATH) == 1
+    assert "suggestions" not in json.loads(invoke("stations", "Madrid").stdout)
+    result = invoke("search", "Mdrid", "Barcelona")
+    assert result.exit_code == 2 and "Did you mean Madrid (Todas) (MADRI)" in result.stderr
+    assert config.SEARCH_TRAVEL_PATH not in fake.paths()

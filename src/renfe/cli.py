@@ -149,7 +149,10 @@ def stations_cmd(
         if not found:  # asked to, or nothing in the shipped list matches: Renfe's live list
             with _client() as client:
                 found = pick(stations_mod.load(client, refresh=refresh))
-        return {"query": query, "count": len(found), "stations": [s.to_dict() for s in found]}
+        out = {"query": query, "count": len(found), "stations": [s.to_dict() for s in found]}
+        if not found:
+            out["suggestions"] = [s.to_dict() for s in stations_mod.suggestions(query or "")]
+        return out
 
     _emit(produce)
 
