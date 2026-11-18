@@ -370,3 +370,29 @@ def test_checkout_uses_one_way_guest_flow(fake, monkeypatch):
 def test_invalid_checkout_never_opens_browser(fake, opts):
     assert invoke("checkout", "Madrid", "Barcelona", *opts).exit_code == 2
     assert not fake.requests
+
+
+def test_apple_pay_opens_safari_with_the_requested_route_and_date(fake, monkeypatch):
+    opened = []
+    monkeypatch.setattr(cli.shop_mod, "open_in_safari", lambda url: opened.append(url) or True)
+    result = invoke("checkout", "Madrid", "Barcelona", "-d", "tomorrow", "--method", "apple-pay", "-t", "00601+00533")
+    assert result.exit_code == 0
+    out = json.loads(result.stdout)
+    assert out["status"] == "handed_off" and out["requested_method"] == "apple-pay"
+    assert opened == [out["url"]]
+    assert "origin=MADRI&destination=BARCE&departure-date=2026-11-16" in out["url"]
+    assert "Apple Pay" in out["next"] and "601+533" in out["next"]
+    assert not fake.requests
+
+
+def test_apple_pay_review_never_opens_a_browser(fake, monkeypatch):
+    monkeypatch.setattr(cli.shop_mod, "open_in_safari", lambda url: pytest.fail("unexpected Safari launch"))
+    result = invoke("checkout", "Madrid", "Barcelona", "--method", "apple-pay", "--review-only")
+    assert result.exit_code == 2 and "Review-only" in result.stderr
+    assert not fake.requests
+
+
+def test_apple_pay_unavailable_reports_no_handoff(fake, monkeypatch):
+    monkeypatch.setattr(cli.shop_mod, "open_in_safari", lambda url: False)
+    result = invoke("checkout", "Madrid", "Barcelona", "--method", "apple-pay")
+    assert result.exit_code == 2 and not result.stdout

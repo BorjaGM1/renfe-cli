@@ -6,7 +6,7 @@ from datetime import date
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
-from . import legacy
+from . import legacy, shop
 from .errors import ApiShapeError, UpstreamError, UsageError
 from .stations import Station
 
@@ -18,6 +18,7 @@ RECEIPT = f"{legacy.BASE}/finalCompraEnlaceVXY.do"
 
 
 class Method(StrEnum):
+    apple_pay = "apple-pay"
     paypal = "paypal"
     card = "card"
     bizum = "bizum"
@@ -148,6 +149,20 @@ def _purchase(page: "Page", results: str, method: Method, train: list[str] | Non
 
 def checkout(origin: Station, destination: Station, day: date, method: Method, train: list[str] | None,
              review_only: bool, progress: Callable[[str], None]) -> dict:
+    if method == Method.apple_pay:
+        if review_only:
+            raise UsageError("Apple Pay opens Safari for manual checkout. Review-only pricing requires a "
+                             "method supported in Chrome.")
+        page = shop.link(origin, destination, day)
+        if not shop.open_in_safari(page["url"]):
+            raise UsageError("Apple Pay checkout needs Safari on macOS. Use `renfe open --no-browser` "
+                             "to get the search link for another device.")
+        next_step = page["next"]
+        if train:
+            next_step += f" Look for service {'+'.join(train)} in the results."
+        return {"status": "handed_off", "requested_method": method.value, "browser": "Safari",
+                "url": page["url"], "next": next_step + " Choose Apple Pay at payment and confirm in Safari."}
+
     try:
         from playwright.sync_api import Error as BrowserError, sync_playwright
     except ImportError:
