@@ -23,6 +23,7 @@ class Method(StrEnum):
     bizum = "bizum"
     google_pay = "google-pay"
     renfe_points = "renfe-points"
+    aplazame = "aplazame"
 
 
 # Renfe hides Apple Pay in Chrome. Only select a method actually offered on this trip.
@@ -105,6 +106,34 @@ def _select_method(page: "Page", method: Method) -> str:
     return total
 
 
+def _whole_euros(total: str) -> int:
+    """Renfe's threshold is in whole euros. Accept decimal commas or points and grouped thousands."""
+    amount, unit = total.split()
+    if unit in {"€", "EUR"}:
+        for thousands, decimal in ((r"\.", ","), (",", r"\.")):
+            match = re.fullmatch(rf"(?P<whole>[0-9]+|[1-9][0-9]{{0,2}}(?:{thousands}[0-9]{{3}})+)"
+                                 rf"(?:{decimal}[0-9]{{1,2}})?", amount)
+            if match:
+                return int(re.sub(thousands, "", match["whole"]))
+    raise ApiShapeError("Renfe's installment checkout returned an unrecognized euro total.")
+
+
+def _prepare_payment(page: "Page", method: Method) -> dict[str, str]:
+    if method != Method.aplazame:
+        return {"selected_method": method.value, "total": _select_method(page, method)}
+
+    # Renfe advertises financing on the card option. The buyer chooses Aplazame later at the gateway.
+    offer = page.locator("#headingOne .radio-title").filter(has_text=re.compile(r"paga en 4 meses", re.I))
+    if not offer.is_visible():
+        raise UsageError("Renfe doesn't show the four-month card option for this checkout.")
+    total = _select_method(page, Method.card)
+    if _whole_euros(total) < 150:
+        raise UsageError(f"Renfe requires a total of at least €150 for Aplazame. This checkout totals {total}.")
+    return {"requested_method": method.value, "selected_method": Method.card.value, "total": total,
+            "next": "At the card gateway, open 'Otras formas de pago', choose Aplazame and review the "
+                    "financing terms. If Aplazame is absent, stop before authorizing a payment."}
+
+
 def _purchase(page: "Page", results: str, method: Method, train: list[str] | None,
               review_only: bool, progress: Callable[[str], None]) -> dict:
     """The only automated clicks expand a train and select a payment method."""
@@ -125,10 +154,13 @@ def _purchase(page: "Page", results: str, method: Method, train: list[str] | Non
             _expand_train(page, train)
         progress("Choose your fare, enter the passenger details and review extras in Chrome.")
         page.wait_for_url(lambda u: _page_url(u) == PAYMENT, wait_until="domcontentloaded", timeout=0)
-        total = _select_method(page, method)
+        payment = _prepare_payment(page, method)
         if review_only:
-            return {"status": "reviewed", "selected_method": method.value, "total": total}
-        progress(f"Selected {method.value} ({total}). Review Renfe's total and terms, then continue in Chrome. "
+            return {"status": "reviewed", **payment}
+        if "next" in payment:
+            progress(payment["next"])
+        progress(f"Selected {payment['selected_method']} ({payment['total']}). Review Renfe's total and terms, "
+                 "then continue in Chrome. "
                  "Keep this window open through the return from the payment provider.")
         page.wait_for_url(lambda u: _page_url(u) == RECEIPT, wait_until="domcontentloaded", timeout=0)
         # The callback and final POST can also carry a cancellation or an error.
