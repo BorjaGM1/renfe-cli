@@ -83,6 +83,12 @@ earlier, it reports `unconfirmed`. If you already approved payment, check your c
 trying again. Checkout uses a temporary Chrome profile and writes progress to stderr. Passenger and
 payment details stay out of CLI output.
 
+**Four-month installments.** With `--method aplazame`, checkout looks for Renfe’s four-month card
+option and checks the displayed total against the €150 minimum. In review mode it reports
+`requested_method: aplazame` and `selected_method: card`. To use installments, choose Aplazame under
+“Otras formas de pago” at the card gateway and review the financing terms there. The provider decides
+approval. [Renfe’s Aplazame instructions](https://www.renfe.com/es/es/viajar/informacion-util/donde-comprar/aplazame)
+
 Dates are YYYY-MM-DD, `today` or `tomorrow`, up to a year ahead. `search` returns at most 10 trains by default
 (`--limit`, up to 200). Fares cost one extra request per 3
 trains. For today, trains that have already left are hidden unless you pass `--after`; before 25 Jan 2027

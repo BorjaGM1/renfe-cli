@@ -5,7 +5,7 @@ import os
 import pytest
 
 from renfe import checkout, legacy
-from renfe.errors import UpstreamError, UsageError
+from renfe.errors import ApiShapeError, UpstreamError, UsageError
 
 
 @pytest.fixture(scope="module")
@@ -149,3 +149,39 @@ def test_closing_before_payment_is_unconfirmed(tab):
     out = checkout._purchase(tab, legacy.RESULTS_URL, checkout.Method.paypal, None, False,
                              lambda _: tab.evaluate("setTimeout(() => console.log('leave'), 25)"))
     assert out == {"status": "unconfirmed"}
+
+
+@pytest.mark.parametrize("total,euros", [("149,99 €", 149), ("150.00 €", 150), ("150 EUR", 150),
+                                         ("1.234,50 €", 1234), ("1,234.50 €", 1234)])
+def test_aplazame_converts_displayed_totals_to_whole_euros(total, euros):
+    assert checkout._whole_euros(total) == euros
+
+
+def test_aplazame_rejects_unrecognized_grouping():
+    with pytest.raises(ApiShapeError):
+        checkout._whole_euros("1,2.50 €")
+
+
+@pytest.mark.parametrize("quoted,offered,error", [("150.00 €", True, None), ("149.99 €", True, "at least €150"),
+                                                  ("200.00 €", False, "four-month card option")])
+def test_aplazame_review_uses_the_card_gateway_only_when_offered(tab, quoted, offered, error):
+    heading = "Tarjeta / Paga en 4 meses sin intereses" if offered else "Tarjeta"
+    markup = payment("tarjetaRedSys", "02", "02").replace("42.50 €", quoted)
+    markup = markup.replace("<form method=", f'<div id="headingOne"><span class="radio-title">{heading}</span></div>'
+                                             '<form method=')
+    requests = fixtures(tab, {("GET", legacy.RESULTS_URL): results(), ("GET", checkout.PAYMENT): markup})
+    tab.context.route("**/*", checkout._review_guard())
+
+    def review():
+        return checkout._purchase(tab, legacy.RESULTS_URL, checkout.Method.aplazame, None, True,
+                                  lambda _: tab.goto(checkout.PAYMENT))
+
+    if error:
+        with pytest.raises(UsageError, match=error):
+            review()
+    else:
+        out = review()
+        assert out["status"] == "reviewed" and out["total"] == quoted
+        assert out["requested_method"] == "aplazame" and out["selected_method"] == "card"
+        assert "Otras formas de pago" in out["next"]
+    assert ("POST", checkout.PAYMENT) not in requests
