@@ -28,6 +28,7 @@ uv run renfe search MADRI BARCE -d 2027-02-05 --no-fares   # timetable only
 uv run renfe stations sevilla                             # find a station or its code
 uv run renfe open Madrid Barcelona -d 2027-01-29 --train 03081   # buy it on Renfe's website
 uv run renfe delays                                       # delayed trains, with scheduled endpoint times
+uv run renfe delays 37432                                 # a delayed train using this number on any verified section
 uv run renfe status 03081                                 # that train's live delay and next station
 uv run renfe watch 03081                                  # a JSON line each time that changes
 ```
@@ -171,10 +172,23 @@ timetable, cached for 24 hours. Any retried requests appear in the top-level `re
 It checks the service calendar, including dated exceptions, and
 uses the reported delay and live time to identify the run around midnight. [Renfe's timetable](https://data.renfe.com/es/dataset/horarios-de-alta-velocidad-larga-distancia-y-media-distancia)
 
+**Looking up the number on a ticket.** `renfe delays TRAIN` returns every delayed train whose live
+number or verified section matches. Leading zeros are optional. `train` is the number on the live map.
+Each entry in `number_segments` gives a train number, its origin and destination stations, and its
+scheduled departure and arrival for that stretch. A single train still counts once. On November 18,
+for example, `00632` ran from Zaragoza to Salamanca. `37632` covered Miranda de Ebro to Valladolid,
+and `37432` covered Valladolid to Salamanca. All three searches returned the same live report.
+The network totals still cover the whole map. `matched_trains` counts the rows returned by the filter.
+
+Renfe's published groupings supply candidate numbers. The CLI checks active services on the run date,
+including when a train arrives after midnight. A shared stretch must have matching stations, direction
+and times. To join successive legs it also checks the published journey endpoints and how the legs
+meet. A number missing from the published list or lacking timetable evidence can be absent from
+`number_segments`. An unresolved schedule has an empty list. [Renfe's published train-number groups](https://grupo.renfe.com/content/dam/grupo-renfe/sala-de-prensa/sala-de-prensa/general/pdf-y-otros/Trenes%2017%20noviembre%20SC.pdf)
+
 - `schedule_match: exact` means the train number and both stations match one set of scheduled times.
-- `linked` means Renfe lists the journey under two numbers. The CLI checks the dated timetable for
-  both legs at their junction and includes the numbers in `schedule_trains`. It recognizes the Bilbao
-  to Madrid and Figueres to Alicante pairings. [Renfe's service-number list](https://grupo.renfe.com/content/dam/grupo-renfe/sala-de-prensa/sala-de-prensa/general/pdf-y-otros/Trenes%2017%20noviembre%20SC.pdf)
+- `linked` means matching the journey required another published number. `schedule_trains` lists
+  the verified numbers and `number_segments` shows where each applies.
 - `unmatched` means no schedule fit. `ambiguous` means several different times fit. In both cases
   the train stays in the list with both scheduled times set to `null`.
 - If the timetable fails, `schedule_match` is `unavailable` and the top-level `notice` explains why.
@@ -188,6 +202,12 @@ the expected arrival there), `overdue`, `reported_at`, `map_updated` and `retrie
 map's request). `reported_at` is the time on the
 train's entry; Renfe refreshes it every few minutes even when the entry's delay and stations are hours old,
 so it doesn't show how fresh they are.
+
+When a ticket number is absent from the map but a published partner number is present, `renfe status TRAIN`
+checks the timetable for a matching section. A unique match includes the ticket number in `requested_train`
+and the live number in `train`, including for early and on-time trains. When several live trains match,
+`matching_trains` lists them and the delay is unknown. `renfe watch` takes the live number from `train`.
+
 - **While it runs, and mainly long- and medium-distance trains.** The map lists trains around the time they
   run (some while still at their first station), and at night it is empty. A train that isn't on it has
   `on_map: false` and no delay: it may not have left yet, may have arrived or been cancelled, or isn't on

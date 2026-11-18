@@ -233,20 +233,23 @@ def _train_number(text: str) -> str:
 
 
 @app.command("delays")
-def delays_cmd() -> None:
-    """List every delayed train on Renfe's live map with its scheduled departure and arrival, most delayed first."""
+def delays_cmd(
+    train: Annotated[str | None, typer.Argument(help="Filter by the live number or a verified ticket number.")] = None,
+) -> None:
+    """List delayed trains with scheduled times and the train numbers used along each route."""
 
     def produce() -> dict:
+        wanted = _train_number(train) if train is not None else None
         with _client() as client:
             board = live.fetch(transport=client.transport, retries=client.retries)
-            return delays_mod.report(board, _names(), transport=client.transport, retries=client.retries)
+            return delays_mod.report(board, _names(), transport=client.transport, retries=client.retries, train=wanted)
 
     _emit(produce)
 
 
 @app.command("status")
 def status_cmd(
-    train: Annotated[str, typer.Argument(help="A train number from `renfe search`, e.g. 03081.")],
+    train: Annotated[str, typer.Argument(help="A live train number or ticket number, e.g. 03081.")],
 ) -> None:
     """A train's live delay and its next station, from Renfe's live train map (long- and medium-distance trains,
     while they run)."""
@@ -255,7 +258,7 @@ def status_cmd(
         number = _train_number(train)
         with _client() as client:
             board = live.fetch(transport=client.transport, retries=client.retries)
-        return live.status(board, number, _names(), client.retries)
+            return delays_mod.status(board, number, _names(), transport=client.transport, retries=client.retries)
 
     _emit(produce)
 
