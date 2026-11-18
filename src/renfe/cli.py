@@ -5,6 +5,7 @@
 import json
 import re
 import sys
+import time as time_mod
 from collections.abc import Callable, Sequence
 from datetime import date, datetime, time, timedelta
 from typing import Annotated, Any, NoReturn
@@ -16,15 +17,15 @@ try:  # Typer >= 0.29 vendors Click; older Typer uses the click package
 except ImportError:  # pragma: no cover
     from click import exceptions as click_exceptions
 
-from . import package_version, search as search_mod, shop as shop_mod, stations as stations_mod
+from . import config, live, package_version, search as search_mod, shop as shop_mod, stations as stations_mod
 from .client import RsvClient
-from .errors import RenfeError, UsageError
+from .errors import ApiShapeError, RenfeError, UpstreamError, UsageError
 from .output import render, render_error
 
 app = typer.Typer(
     name="renfe",
-    help="Search Renfe trains and fares over Renfe's own web API, then open Renfe's website to buy. "
-         "No account needed. Output is JSON.",
+    help="Search Renfe trains and fares over Renfe's own web API, then open Renfe's website to buy; follow a "
+         "train's live delay. No account needed. Output is JSON.",
     no_args_is_help=True,
     add_completion=False,
     # Rich tracebacks print frame locals, which include the bearer and the api key.
@@ -148,6 +149,10 @@ def _names(*picked: stations_mod.Station) -> dict[str, str]:
     return {s.code: s.name for s in stations_mod.bundled()} | {s.code: s.name for s in picked}
 
 
+def _add_notice(out: dict, text: str) -> None:
+    out["notice"] = f"{out['notice']} {text}" if out["notice"] else text
+
+
 @app.command("search")
 def search_cmd(
     origin: Annotated[str, typer.Argument(help="From: a station name (Madrid, Atocha) or code (MADRI, 60000).")],
@@ -159,21 +164,31 @@ def search_cmd(
     limit: Annotated[int, typer.Option(min=1, max=200, help="Most trains to return, earliest first.")] = 10,
 ) -> None:
     """Trains from ORIGIN to DESTINATION on a date, with fares for one adult (before 25 Jan 2027, from Renfe's
-    legacy shop)."""
+    legacy shop). For today, also each train's live delay, from Renfe's live train map."""
 
     def produce() -> dict:
         day, after_time = _parse_date(date_), _parse_time(after)
         now = datetime.now(search_mod.MADRID)
-        hide_departed = after_time is None and day == now.date()
+        today = day == now.date()
+        hide_departed = after_time is None and today
         if hide_departed:  # don't list trains that have already left
             after_time = now.time().replace(second=0, microsecond=0)
         with make_client() as client:
             src, dst = _stations(client, origin, destination)
+            delays = live.in_background(client.transport) if today else None  # runs alongside the search
             out = search_mod.search(client, src, dst, day, names=_names(src, dst), after=after_time, fares=fares,
                                     limit=limit)
         if hide_departed and out["count"] == 0:
-            gone = f"No more trains today after {after_time.strftime('%H:%M')}; try --date tomorrow."
-            out["notice"] = f"{out['notice']} {gone}" if out["notice"] else gone
+            _add_notice(out, f"No more trains today after {after_time.strftime('%H:%M')}; try --date tomorrow.")
+        board, why = delays() if delays else (None, None)
+        try:
+            live.annotate(out["trains"], board)
+        except Exception as exc:  # the map never fails a search: a bug here leaves it without delays
+            live.annotate(out["trains"], None)
+            board, why = None, f"{live.LABEL}: unexpected error ({type(exc).__name__})"
+        out["delays_included"] = board is not None
+        if why:
+            _add_notice(out, f"Delays are unknown ({why}).")
         return out
 
     _emit(produce)
@@ -189,6 +204,86 @@ def _service_parts(text: str) -> list[str] | None:
     if not re.fullmatch(r"[0-9]{1,6}(\+[0-9]{1,6})*", compact):
         return None
     return [part.lstrip("0") or "0" for part in compact.split("+")]
+
+
+def _train_number(text: str) -> str:
+    parts = _service_parts(text)
+    if parts is None or len(parts) != 1:
+        raise UsageError(f"TRAIN must be one train number such as 03081; for a train with a change, one leg's "
+                         f"(got {text!r})")
+    return parts[0]
+
+
+@app.command("status")
+def status_cmd(
+    train: Annotated[str, typer.Argument(help="A train number from `renfe search`, e.g. 03081.")],
+) -> None:
+    """A train's live delay and its next station, from Renfe's live train map (long- and medium-distance trains,
+    while they run)."""
+
+    def produce() -> dict:
+        number = _train_number(train)
+        with make_client() as client:
+            board = live.fetch(transport=client.transport)
+        return live.status(board, number, _names())
+
+    _emit(produce)
+
+
+_sleep, _clock = time_mod.sleep, time_mod.monotonic  # tests replace these
+_OUTAGE = object()  # the last line said the map was unreachable
+
+
+def _line(payload: dict) -> None:
+    typer.echo(json.dumps(payload, ensure_ascii=False, allow_nan=False))  # echo flushes: fine in a pipe
+
+
+@app.command("watch")
+def watch_cmd(
+    train: Annotated[str, typer.Argument(help="A train number from `renfe search`, e.g. 03081.")],
+) -> None:
+    """Check a train's live delay every 2 minutes. Prints one JSON line, shaped like `renfe status`, on the first
+    check and whenever its delay, its next station or the expected arrival there, `overdue` (held past that
+    arrival) or its being on the map changes; an `event` line when the map stops answering and when the watch
+    ends. Ends after 12 hours, or on Ctrl-C."""
+    try:
+        number = _train_number(train)
+    except UsageError as err:
+        _fail(err)
+    names, last, unreadable = _names(), None, 0
+    deadline = _clock() + config.WATCH_LIMIT
+    try:
+        with make_client() as client:
+            while True:
+                try:
+                    now = live.status(live.fetch(transport=client.transport), number, names)
+                except (UpstreamError, ApiShapeError) as err:  # a hiccup: one line per outage, and it keeps watching
+                    unreadable = unreadable + 1 if isinstance(err, ApiShapeError) else 0
+                    if unreadable >= config.WATCH_MAX_UNREADABLE:
+                        _fail(err)  # answer after answer isn't the map: it has moved or changed
+                    if last is not _OUTAGE:
+                        _line({"train": number.zfill(5), "event": "map_unreachable", "error": err.to_dict()})
+                        last = _OUTAGE  # so the first answer after it prints a line, changed or not
+                except RenfeError as err:  # blocked or rate-limited: stop, as every command does
+                    _fail(err)
+                except Exception as exc:
+                    _fail(RenfeError(f"unexpected internal error: {type(exc).__name__}"))
+                else:
+                    unreadable = 0
+                    nxt = now["next_station"] or {}
+                    seen = (now["on_map"], now["delay_minutes"], nxt.get("code"), nxt.get("expected_arrival"),
+                            now["overdue"])
+                    if seen != last:
+                        _line(now)
+                        last = seen
+                left = deadline - _clock()
+                if left <= 0:
+                    _line({"train": number.zfill(5), "event": "ended",
+                           "message": f"watched for {config.WATCH_LIMIT / 3600:g} h; run it again to keep watching"})
+                    return
+                _sleep(min(config.WATCH_INTERVAL, left))
+    except KeyboardInterrupt:  # the way to stop it before the time limit: exit 0
+        return
 
 
 @app.command("open")

@@ -137,13 +137,38 @@ def dwr_response(call: str) -> httpx.Response:
 LEGACY_SESSION = "FAKEDWRSESSION0001"
 
 
+# Renfe's live train map (config.LIVE_MAP_URL). Made-up positions, in the map's shape: Madrid times without a zone.
+
+
+def map_train(number, delay, previous, next_, expected, reported="2027-01-29T09:29:40", origin="60000",
+              destination="71801"):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    stamp = int(datetime.fromisoformat(reported).replace(tzinfo=ZoneInfo("Europe/Madrid")).timestamp())
+    return {"codComercial": number, "codEstAnt": previous, "codEstSig": next_, "horaLlegadaSigEst": expected,
+            "codProduct": 2, "codOrigen": origin, "codDestino": destination, "accesible": False,
+            "ultRetraso": str(delay), "time": stamp, "p": "1"}
+
+
+def live_map(*trains, updated="2027-01-29T09:30:00") -> dict:
+    return {"fechaActualizacion": updated, "trenes": list(trains)}
+
+
+# 09:30 on the day TRAVEL_OPTIONS runs: 03100 (09:00 from Madrid) 12 minutes late on its way to Zaragoza, and 00500
+# (09:30 from Zaragoza, a change's second leg) 5 minutes late, standing in Zaragoza.
+LIVE_MAP = live_map(map_train("03100", 12, "60000", "04040", "2027-01-29T10:32:00"),
+                    map_train("00500", 5, "04040", "04040", "2027-01-29T09:33:00", origin="04040"))
+
+
 class FakeRenfe:
     """Routes requests by URL; records them for assertions."""
 
-    def __init__(self, legacy_trains=None, **overrides):
+    def __init__(self, legacy_trains=None, live=None, **overrides):
         self.requests: list[httpx.Request] = []
         self.overrides = overrides  # url-path -> callable(request) -> httpx.Response
         self.legacy_trains = LEGACY_TRAINS if legacy_trains is None else legacy_trains
+        self.live = LIVE_MAP if live is None else live
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -164,6 +189,8 @@ class FakeRenfe:
             return httpx.Response(200, json=priced(body["travels"][0]["routes"]))
         if request.url.host == "venta.renfe.com":
             return self.legacy(request)
+        if url == config.LIVE_MAP_URL:
+            return httpx.Response(200, json=self.live)
         return httpx.Response(404, json={"codeError": "NOT_FOUND"})
 
     def legacy(self, request: httpx.Request) -> httpx.Response:
@@ -189,3 +216,6 @@ class FakeRenfe:
 
     def new_system_requests(self) -> list[httpx.Request]:
         return [request for request in self.requests if request.url.host == "api.rsv.renfe.com"]
+
+    def live_requests(self) -> list[httpx.Request]:
+        return [request for request in self.requests if str(request.url) == config.LIVE_MAP_URL]

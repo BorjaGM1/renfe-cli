@@ -1,0 +1,486 @@
+"""Live delays from Renfe's live train map: `renfe status`. Every map here is synthetic (fakes.live_map)."""
+
+import json
+
+import httpx
+import pytest
+from typer.testing import CliRunner
+
+from renfe import cli, config, live
+
+from fakes import FakeRenfe, live_map, map_train
+
+runner = CliRunner()
+
+
+def use(monkeypatch, handler: FakeRenfe) -> FakeRenfe:
+    monkeypatch.setattr(cli, "make_client", lambda: cli.RsvClient(transport=httpx.MockTransport(handler), spacing=0))
+    return handler
+
+
+@pytest.fixture
+def fake(monkeypatch):
+    return use(monkeypatch, FakeRenfe())
+
+
+def invoke(*args):
+    return runner.invoke(cli.app, list(args))
+
+
+def raising(exc: Exception):
+    def answer(request):
+        raise exc
+    return answer
+
+
+def test_status_of_a_train_on_the_map(fake):
+    result = invoke("status", "03100")
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == {
+        "train": "03100", "on_map": True, "delay_minutes": 12,
+        "origin": {"code": "60000", "name": "Madrid-Puerta de Atocha-Almudena Grandes"},
+        "destination": {"code": "71801", "name": "Barcelona-Sants"},
+        "previous_station": {"code": "60000", "name": "Madrid-Puerta de Atocha-Almudena Grandes"},
+        "next_station": {"code": "04040", "name": "Zaragoza-Delicias", "expected_arrival": "2027-01-29T10:32:00+01:00"},
+        "overdue": False, "reported_at": "2027-01-29T09:29:40+01:00", "map_updated": "2027-01-29T09:30:00+01:00",
+        "notice": None,
+    }
+    assert [str(r.url) for r in fake.requests] == [config.LIVE_MAP_URL]  # one request, and none to the search's API
+
+
+def test_status_takes_the_number_without_its_leading_zero(fake):
+    assert json.loads(invoke("status", "3100").stdout)["delay_minutes"] == 12
+
+
+def test_a_train_not_on_the_map_has_no_delay_and_says_why(fake):
+    result = invoke("status", "03000")
+    assert result.exit_code == 0, result.output
+    out = json.loads(result.stdout)
+    assert out["train"] == "03000" and out["on_map"] is False and out["delay_minutes"] is None
+    assert out["next_station"] is None and out["overdue"] is None and out["map_updated"] == "2027-01-29T09:30:00+01:00"
+    assert "may not have left yet" in out["notice"] and "unknown, not zero" in out["notice"]
+    assert "empty at night" not in out["notice"]
+
+
+def test_an_empty_map_says_so(monkeypatch):
+    use(monkeypatch, FakeRenfe(live=live_map(updated="2027-01-29T02:00:00")))
+    out = json.loads(invoke("status", "03100").stdout)
+    assert out["on_map"] is False and "lists no trains right now" in out["notice"]
+
+
+def test_a_train_standing_at_a_station_says_it_is_probably_stopped(fake):
+    out = json.loads(invoke("status", "00500").stdout)
+    assert out["previous_station"] == {"code": "04040", "name": "Zaragoza-Delicias"} and out["overdue"] is False
+    assert out["notice"] == "The train is probably stopped at Zaragoza-Delicias, since about 09:33."
+
+
+@pytest.mark.parametrize("previous,delay,expected,overdue,says", [
+    ("60000", 12, "2027-01-29T09:26:00", False, None),                # between stations, 4 min past: not yet...
+    ("60000", 12, "2027-01-29T09:24:00", True, "(09:24) has already passed"),  # ...6 min past: overdue
+    ("04040", 12, "2027-01-29T09:21:00", False, "stopped at Zaragoza-Delicias, since about 09:21."),  # a stop
+    ("04040", 12, "2027-01-29T09:19:00", True, "since about 09:19, longer than a stop"),  # 11 min: held
+    ("04040", -8, "2027-01-29T08:50:00", False, "since about 08:50."),  # early: waiting for its time, never overdue
+    ("60000", -3, "2027-01-29T09:00:00", False, None),
+])
+def test_overdue_leaves_room_for_a_stop_and_never_flags_an_early_train(monkeypatch, previous, delay, expected,
+                                                                       overdue, says):
+    """The map's time is 09:30. As at 17:48 on 17 Nov: 18014 (11 min at Burgos, really late) is overdue; 17012
+    (8 min early, waiting at Plasencia) isn't."""
+    use(monkeypatch, FakeRenfe(live=live_map(map_train("03100", delay, previous, "04040", expected))))
+    out = json.loads(invoke("status", "03100").stdout)
+    assert out["overdue"] is overdue
+    assert out["notice"] is None if says is None else says in out["notice"]
+
+
+def test_a_held_train_says_its_delay_may_be_growing(monkeypatch):
+    """A next-station arrival already past: the delay is the last one recorded (seen at 17:48, 9 h past)."""
+    held = map_train("03200", 7, "60000", "04040", "2027-01-29T08:51:00")
+    use(monkeypatch, FakeRenfe(live=live_map(held)))
+    out = json.loads(invoke("status", "03200").stdout)
+    assert out["delay_minutes"] == 7 and out["overdue"] is True and "(08:51) has already passed" in out["notice"]
+    assert "probably stopped" not in out["notice"]
+
+
+def test_early_trains_and_unreadable_fields(monkeypatch):
+    odd = map_train("03300", -3, "60000", "", "not a time")
+    odd["time"] = "soon"
+    broken = map_train("03400", 5, "60000", "04040", "2027-01-29T10:00:00")
+    broken["ultRetraso"] = ""
+    numeric = map_train("03500", 6, "60000", "04040", "2027-01-29T10:00:00")
+    numeric["ultRetraso"] = 6
+    use(monkeypatch, FakeRenfe(live=live_map(odd, broken, numeric, "junk", {"codComercial": 3600},
+                                             {"codComercial": "3 1"})))
+    out = json.loads(invoke("status", "03300").stdout)
+    assert out["delay_minutes"] == -3 and out["next_station"] is None and out["reported_at"] is None
+    assert json.loads(invoke("status", "03400").stdout)["delay_minutes"] is None  # listed, delay unreadable
+    assert json.loads(invoke("status", "03500").stdout)["delay_minutes"] == 6  # a JSON number reads too
+
+
+@pytest.mark.parametrize("answer,exit_code,kind", [
+    (raising(httpx.ConnectError("refused")), 5, "upstream_unavailable"),
+    (raising(httpx.ReadTimeout("slow")), 5, "upstream_unavailable"),
+    (lambda r: httpx.Response(503, json={}), 5, "upstream_unavailable"),
+    (lambda r: httpx.Response(429, json={}), 5, "blocked"),
+    (lambda r: httpx.Response(200, headers={"content-type": "text/html"}, text="<html>"), 5, "blocked"),
+    (lambda r: httpx.Response(404, json={}), 7, "api_changed"),
+    (lambda r: httpx.Response(200, text="not json"), 7, "api_changed"),
+    (lambda r: httpx.Response(200, json={"trains": []}), 7, "api_changed"),
+])
+def test_a_map_that_doesnt_answer_is_an_error_not_a_train_without_delay(monkeypatch, answer, exit_code, kind):
+    use(monkeypatch, FakeRenfe(**{"flotaLD": answer}))
+    result = invoke("status", "03100")
+    assert result.exit_code == exit_code and result.stdout == ""
+    err = json.loads(result.stderr)["error"]
+    assert err["type"] == kind and err["message"].startswith("live map:")
+
+
+def test_a_map_that_changed_points_at_live_py(monkeypatch):
+    use(monkeypatch, FakeRenfe(**{"flotaLD": lambda r: httpx.Response(200, text="not json")}))
+    err = json.loads(invoke("status", "03100").stderr)["error"]
+    assert err["type"] == "api_changed" and "renfe/live.py" in err["hint"] and "search.py" not in err["hint"]
+
+
+@pytest.mark.parametrize("train", ["00600+00500", "abc", "", "1234567"])
+def test_status_takes_one_train_number(fake, train):
+    result = invoke("status", train)
+    assert result.exit_code == 2 and "TRAIN must be one train number" in json.loads(result.stderr)["error"]["message"]
+    assert fake.requests == []
+
+
+def test_parse_keeps_the_first_entry_of_a_number_listed_twice():
+    board = live.parse(live_map(map_train("03100", 1, "60000", "04040", "2027-01-29T10:00:00"),
+                                map_train("3100", 9, "60000", "04040", "2027-01-29T10:00:00")))
+    assert list(board.trains) == ["3100"] and board.trains["3100"]["delay"] == 1
+
+
+# --- `renfe search` for today ------------------------------------------------------------------------------------
+
+
+def frozen_at(monkeypatch, moment: str) -> None:
+    """Pin the CLI's "now" to a Madrid wall-clock time."""
+    from datetime import datetime as real_datetime
+
+    pinned = real_datetime.fromisoformat(moment).replace(tzinfo=live.MADRID)
+
+    class Frozen(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return pinned
+
+    monkeypatch.setattr(cli, "datetime", Frozen)
+
+
+def delays(out: dict) -> dict:
+    """Service -> the train's `delay_minutes`, which every train has."""
+    return {t["service"]: t["delay_minutes"] for t in out["trains"]}
+
+
+def leg_delays(out: dict, service: str) -> list:
+    return [leg["delay_minutes"] for t in out["trains"] if t["service"] == service for leg in t["legs"]]
+
+
+def no_delays(out: dict) -> bool:
+    return all(part["delay_minutes"] is None for t in out["trains"] for part in [t] + t.get("legs", []))
+
+
+def test_today_each_train_gets_its_delay_and_each_leg_of_a_change_its_own(fake, monkeypatch):
+    frozen_at(monkeypatch, "2027-01-29T09:30")
+    result = invoke("search", "Madrid", "Barcelona", "--after", "06:00")
+    assert result.exit_code == 0, result.output
+    out = json.loads(result.stdout)
+    assert delays(out) == {"03000": None, "00600+00500": 5, "03100": 12, "03200": None}
+    assert leg_delays(out, "00600+00500") == [None, 5]  # the first leg has arrived; the second is running
+    assert "legs" not in out["trains"][2]  # a direct train: its delay is on the train only
+    assert out["delays_included"] is True and out["notice"] is None and out["fares_included"] is True
+    assert len(fake.live_requests()) == 1
+
+
+def test_before_the_cutoff_the_legacy_shops_trains_get_delays_too(monkeypatch):
+    frozen_at(monkeypatch, "2026-11-15T10:00")
+    second_leg = map_train("00500", 8, "04040", "71801", "2026-11-15T12:08:00", reported="2026-11-15T10:00:00")
+    handler = use(monkeypatch, FakeRenfe(live=live_map(second_leg, updated="2026-11-15T10:00:00")))
+    out = json.loads(invoke("search", "Madrid", "Barcelona", "--after", "06:00", "--no-fares").stdout)
+    assert delays(out)["00600+00500"] == 8 and leg_delays(out, "00600+00500") == [None, 8]
+    assert handler.legacy_requests() and not handler.new_system_requests()
+
+
+@pytest.mark.parametrize("answer,why", [
+    (lambda r: httpx.Response(503, json={}), "server error (503)"),
+    (raising(httpx.ConnectError("refused")), "request failed (ConnectError)"),
+    (lambda r: httpx.Response(200, json={"trains": []}), "no list of trains"),
+    (raising(RuntimeError("a bug")), "unexpected error (RuntimeError)"),
+])
+def test_a_map_that_fails_leaves_the_search_and_its_exit_code_alone(monkeypatch, answer, why):
+    frozen_at(monkeypatch, "2027-01-29T09:30")
+    use(monkeypatch, FakeRenfe(**{"flotaLD": answer}))
+    result = invoke("search", "Madrid", "Barcelona", "--after", "06:00")
+    assert result.exit_code == 0, result.output
+    out = json.loads(result.stdout)
+    assert out["count"] == 4 and out["trains"][0]["fares"] and out["delays_included"] is False
+    assert no_delays(out)
+    assert out["notice"].startswith("Delays are unknown (live map:") and why in out["notice"]
+
+
+def test_a_map_that_hangs_costs_the_search_its_budget_only(monkeypatch):
+    import threading
+    import time
+
+    frozen_at(monkeypatch, "2027-01-29T09:30")
+    monkeypatch.setattr(config, "LIVE_SEARCH_BUDGET", 0.2)
+    release = threading.Event()
+    use(monkeypatch, FakeRenfe(**{"flotaLD": lambda r: release.wait(10) and httpx.Response(200, json=live_map())}))
+    started = time.monotonic()
+    try:
+        result = invoke("search", "Madrid", "Barcelona", "--after", "06:00")
+    finally:
+        release.set()
+    assert time.monotonic() - started < 2
+    out = json.loads(result.stdout)
+    assert result.exit_code == 0 and out["count"] == 4 and "no answer within 0.2 s" in out["notice"]
+
+
+def test_a_bug_attaching_delays_leaves_the_search_without_them(fake, monkeypatch):
+    frozen_at(monkeypatch, "2027-01-29T09:30")
+
+    def broken(part, board):
+        if board is not None:
+            raise KeyError("departure")
+        return None
+
+    monkeypatch.setattr(live, "_delay", broken)
+    result = invoke("search", "Madrid", "Barcelona", "--after", "06:00")
+    assert result.exit_code == 0, result.output
+    out = json.loads(result.stdout)
+    assert out["count"] == 4 and out["delays_included"] is False and no_delays(out)
+    assert "Delays are unknown (live map: unexpected error (KeyError))" in out["notice"]
+
+
+def test_a_search_with_an_unknown_station_never_asks_the_map(fake, monkeypatch):
+    frozen_at(monkeypatch, "2027-01-29T09:30")
+    assert invoke("search", "Ruritania Central", "Barcelona").exit_code == 2
+    assert fake.live_requests() == []
+
+
+def test_other_days_never_ask_the_map(fake, monkeypatch):
+    frozen_at(monkeypatch, "2027-01-28T09:30")
+    out = json.loads(invoke("search", "Madrid", "Barcelona", "-d", "tomorrow").stdout)
+    assert out["delays_included"] is False and out["notice"] is None and no_delays(out)
+    assert fake.live_requests() == [] and fake.new_system_requests()
+
+
+def test_open_never_asks_the_map(fake, monkeypatch):
+    frozen_at(monkeypatch, "2027-01-29T09:30")
+    result = invoke("open", "Madrid", "Barcelona", "-d", "today", "--train", "03200", "--no-browser")
+    assert result.exit_code == 0, result.output
+    assert fake.live_requests() == [] and "delay_minutes" not in json.loads(result.stdout)["train"]
+
+
+def test_after_midnight_yesterdays_run_lends_no_delay_to_tonights(monkeypatch):
+    """As seen at 02:14 on 18 Nov: yesterday's run still going after midnight, its arrival dated a day ahead. Today's
+    03200 leaves at 13:00, too far from a train seen at 00:30; 03100, seen 8.5 h before its 09:00 leg, keeps its."""
+    frozen_at(monkeypatch, "2027-01-29T00:30")
+    late = map_train("03200", 40, "60000", "04040", "2027-01-30T00:50:00", reported="2027-01-29T00:30:00")
+    early = map_train("03100", 3, "60000", "04040", "2027-01-29T01:03:00", reported="2027-01-29T00:30:00")
+    use(monkeypatch, FakeRenfe(live=live_map(late, early, updated="2027-01-29T00:30:00")))
+    out = json.loads(invoke("search", "Madrid", "Barcelona", "--no-fares").stdout)
+    assert delays(out)["03200"] is None and delays(out)["03100"] == 3 and out["delays_included"] is True
+
+
+def test_an_entry_hours_out_of_date_gives_search_no_delay_and_a_live_leg_wins(monkeypatch):
+    """As 08109 at 17:48 on 17 Nov: listed at its origin, delay 0, 7.5 h after its expected arrival. 0 would read
+    as on time. 46 min past is stale; 44 min past is a train held a while, and keeps its number."""
+    frozen_at(monkeypatch, "2027-01-29T09:30")
+    stale = map_train("00600", 0, "60000", "60000", "2027-01-29T02:00:00", reported="2027-01-29T09:29:40")
+    live_leg = map_train("00500", 35, "04040", "04040", "2027-01-29T09:28:00", origin="04040")
+    held = map_train("03100", 20, "60000", "04040", "2027-01-29T08:46:00")
+    gone = map_train("03200", 20, "60000", "04040", "2027-01-29T08:44:00")
+    use(monkeypatch, FakeRenfe(live=live_map(stale, live_leg, held, gone)))
+    out = json.loads(invoke("search", "Madrid", "Barcelona", "--after", "06:00", "--no-fares").stdout)
+    assert leg_delays(out, "00600+00500") == [None, 35] and delays(out)["00600+00500"] == 35
+    assert delays(out)["03100"] == 20 and delays(out)["03200"] is None
+    assert json.loads(invoke("status", "00600").stdout)["delay_minutes"] == 0  # status still shows it, flagged
+    assert json.loads(invoke("status", "00600").stdout)["overdue"] is True
+
+
+@pytest.mark.parametrize("seen,kept", [
+    ("2027-01-28T22:30:00", True),   # 12 h before the leg leaves: still that run
+    ("2027-01-28T22:29:00", False),  # just over: yesterday's
+    ("2027-01-30T00:00:00", True),   # 12 h after it arrives
+    ("2027-01-30T00:01:00", False),
+])
+def test_a_train_seen_within_12_hours_of_the_leg_is_on_its_run(seen, kept):
+    board = live.parse(live_map(map_train("05100", 10, "60000", "04040", seen, reported=seen), updated=seen))
+    leg = {"service": "05100", "departure": "2027-01-29T10:30:00+01:00", "arrival": "2027-01-29T12:00:00+01:00"}
+    live.annotate([leg], board)
+    assert (leg["delay_minutes"] == 10) is kept
+
+
+@pytest.mark.parametrize("legs,expected", [
+    ([("03100", "09:00", "11:40")], (12, [12])),                                # one leg, kept: 12 on both
+    ([("00600", "07:00", "09:00"), ("00500", "09:30", "12:00")], (5, [None, 5])),
+    ([("03100", "07:00", "09:00"), ("00500", "09:30", "12:00")], (12, [12, 5])),  # both on the map: the first
+])
+def test_every_train_gets_its_delay_and_each_leg_its_own(legs, expected):
+    """Whatever the train's shape: search() drops `legs` from a direct train, but annotate() doesn't rely on it."""
+    from fakes import LIVE_MAP
+
+    at = lambda hhmm: f"2027-01-29T{hhmm}:00+01:00"
+    parts = [{"service": n, "departure": at(dep), "arrival": at(arr)} for n, dep, arr in legs]
+    train = {"service": "+".join(n for n, _, _ in legs), "departure": parts[0]["departure"],
+             "arrival": parts[-1]["arrival"], "legs": parts}
+    live.annotate([train], live.parse(LIVE_MAP))
+    assert (train["delay_minutes"], [leg["delay_minutes"] for leg in parts]) == expected
+
+
+def test_an_arrival_the_map_dates_a_day_ahead_is_brought_back(monkeypatch):
+    """At 02:14 the map dated a 02:10 arrival the next day. A train held 13 h keeps its date: past stays past."""
+    ahead = map_train("03200", 170, "04040", "04040", "2027-01-30T02:09:00", reported="2027-01-29T02:14:00")
+    held = map_train("03100", 27, "04040", "04040", "2027-01-28T13:00:00", reported="2027-01-29T02:14:00")
+    use(monkeypatch, FakeRenfe(live=live_map(ahead, held, updated="2027-01-29T02:14:19")))
+    out = json.loads(invoke("status", "03200").stdout)
+    assert out["next_station"]["expected_arrival"] == "2027-01-29T02:09:00+01:00"
+    assert out["overdue"] is False and "since about 02:09." in out["notice"]  # 5 min at a station: a stop
+    out = json.loads(invoke("status", "03100").stdout)
+    assert out["next_station"]["expected_arrival"] == "2027-01-28T13:00:00+01:00"
+    assert out["overdue"] is True and "since about 13:00, longer than a stop" in out["notice"]
+
+
+# --- `renfe watch` -----------------------------------------------------------------------------------------------
+
+
+class Clock:
+    """Fake time for `watch`: sleeping moves it on; `stop_after` sleeps, Ctrl-C."""
+
+    def __init__(self, stop_after=None):
+        self.now, self.sleeps, self.stop_after = 0.0, [], stop_after
+
+    def sleep(self, seconds):
+        if self.stop_after is not None and len(self.sleeps) >= self.stop_after:
+            raise KeyboardInterrupt
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+def watching(monkeypatch, answers, stop_after=None) -> tuple[Clock, FakeRenfe]:
+    """Each check gets the next answer (a map, an exception, or a response); the last one repeats."""
+    clock, queue = Clock(stop_after), list(answers)
+
+    def answer(request):
+        got = queue.pop(0) if len(queue) > 1 else queue[0]
+        if isinstance(got, Exception):
+            raise got
+        return got if isinstance(got, httpx.Response) else httpx.Response(200, json=got)
+
+    monkeypatch.setattr(cli, "_clock", lambda: clock.now)
+    monkeypatch.setattr(cli, "_sleep", clock.sleep)
+    return clock, use(monkeypatch, FakeRenfe(**{"flotaLD": answer}))
+
+
+def at(delay, next_="04040", number="03100"):
+    return live_map(map_train(number, delay, "60000", next_, "2027-01-29T10:32:00"))
+
+
+def lines(result) -> list[dict]:
+    return [json.loads(line) for line in result.stdout.splitlines()]
+
+
+def test_watch_prints_the_first_check_then_only_changes_and_ends_on_its_own(monkeypatch):
+    clock, handler = watching(monkeypatch, [at(12), at(12), at(15), at(15, next_="71801"), at(15, next_="71801"),
+                                            live_map(), at(15, next_="71801")])
+    monkeypatch.setattr(config, "WATCH_LIMIT", 7 * 120.0)
+    result = invoke("watch", "03100")
+    assert result.exit_code == 0, result.output
+    *checks, end = lines(result)
+    got = [(o["on_map"], o["delay_minutes"], (o["next_station"] or {}).get("code")) for o in checks]
+    assert got == [(True, 12, "04040"), (True, 15, "04040"), (True, 15, "71801"), (False, None, None),
+                   (True, 15, "71801")]
+    assert end == {"train": "03100", "event": "ended",
+                   "message": "watched for 0.233333 h; run it again to keep watching"}  # 840 s here, 12 h for real
+    assert checks[0].keys() == json.loads(invoke("status", "03100").stdout).keys()  # status's shape
+    assert len(handler.live_requests()) == 8 + 1 and clock.sleeps == [120.0] * 7  # a check at 0, 120 … 840 s
+    assert result.stderr == ""
+
+
+def test_watch_keeps_polling_a_train_that_hasnt_left_yet(monkeypatch):
+    watching(monkeypatch, [live_map(), live_map(), at(4)], stop_after=3)
+    out = lines(invoke("watch", "3100"))
+    assert [o["on_map"] for o in out] == [False, True] and out[1]["delay_minutes"] == 4
+
+
+def test_a_hiccup_is_reported_once_and_the_watch_goes_on(monkeypatch):
+    watching(monkeypatch, [at(12), httpx.ConnectError("refused"), httpx.Response(503, json={}),
+                           httpx.Response(200, text="cut off"), at(12), at(20)], stop_after=5)
+    result = invoke("watch", "03100")
+    assert result.exit_code == 0, result.output
+    out = lines(result)
+    assert [o.get("event") or o["delay_minutes"] for o in out] == [12, "map_unreachable", 12, 20]  # one per outage
+    assert out[1] == {"train": "03100", "event": "map_unreachable", "error": out[1]["error"]}
+    assert out[1]["error"]["type"] == "upstream_unavailable" and result.stderr == ""
+
+
+def test_an_outage_from_the_first_check_says_so_at_once(monkeypatch):
+    watching(monkeypatch, [httpx.ConnectError("refused"), httpx.ConnectError("refused"), at(12)], stop_after=2)
+    assert [o.get("event") or o["delay_minutes"] for o in lines(invoke("watch", "03100"))] == ["map_unreachable", 12]
+
+
+def test_three_unreadable_answers_in_a_row_stop_the_watch(monkeypatch):
+    """The map moved or changed: exit 7, instead of 12 h of requests. Two, then an answer, carry on."""
+    not_the_map = httpx.Response(404, json={})
+    watching(monkeypatch, [at(12), not_the_map, not_the_map, at(12), not_the_map, not_the_map, not_the_map])
+    result = invoke("watch", "03100")
+    assert result.exit_code == 7
+    err = json.loads(result.stderr)["error"]
+    assert err["type"] == "api_changed" and "renfe/live.py" in err["hint"]
+    assert [o.get("event") or o["delay_minutes"] for o in lines(result)] == [12, "map_unreachable", 12,
+                                                                             "map_unreachable"]
+
+
+def test_a_block_stops_the_watch(monkeypatch):
+    clock, _ = watching(monkeypatch, [at(12), httpx.Response(429, json={})])
+    result = invoke("watch", "03100")
+    assert result.exit_code == 5 and json.loads(result.stderr)["error"]["type"] == "blocked"
+    assert [o["delay_minutes"] for o in lines(result)] == [12] and clock.sleeps == [120.0]
+
+
+def test_ctrl_c_ends_the_watch_cleanly(monkeypatch):
+    watching(monkeypatch, [at(12)], stop_after=0)
+    result = invoke("watch", "03100")
+    assert result.exit_code == 0 and len(lines(result)) == 1
+
+
+def test_the_time_limit_cuts_the_last_sleep_short(monkeypatch):
+    clock, _ = watching(monkeypatch, [at(12)])
+    monkeypatch.setattr(config, "WATCH_LIMIT", 300.0)
+    assert invoke("watch", "03100").exit_code == 0 and clock.sleeps == [120.0, 120.0, 60.0]
+
+
+def test_watch_takes_one_train_number(fake):
+    result = invoke("watch", "00600+00500")
+    assert result.exit_code == 2 and fake.requests == []
+
+
+def test_watch_prints_a_line_whenever_the_expected_arrival_moves(monkeypatch):
+    """Same delay, same next station: Renfe moved the expected arrival alone, by a minute either way (as for 13041
+    and 16000 on 18 Nov at 06:29-06:31). Every move is a line, however small; no move, no line."""
+    def expecting(when):
+        return live_map(map_train("03100", 12, "60000", "04040", f"2027-01-29T{when}"))
+
+    watching(monkeypatch, [expecting("10:32:00"), expecting("10:32:00"), expecting("10:33:00"), expecting("10:32:30"),
+                           expecting("10:32:30")], stop_after=4)
+    out = lines(invoke("watch", "03100"))
+    assert [o["next_station"]["expected_arrival"][11:19] for o in out] == ["10:32:00", "10:33:00", "10:32:30"]
+    assert {o["delay_minutes"] for o in out} == {12}
+
+
+def test_watch_says_once_when_a_held_train_is_overdue_and_again_when_it_moves_on(monkeypatch):
+    """Held: same delay, same next station, its expected arrival (10:32) slipping into the past."""
+    def seen_at(clock, next_="04040", expected="2027-01-29T10:32:00"):
+        stamp = f"2027-01-29T{clock}:00"
+        return live_map(map_train("03100", 12, "60000", next_, expected, reported=stamp), updated=stamp)
+
+    watching(monkeypatch, [seen_at("10:30"), seen_at("10:36"), seen_at("10:38"), seen_at("10:40"), seen_at("10:50"),
+                           seen_at("10:52", next_="71801", expected="2027-01-29T12:10:00")], stop_after=5)
+    out = lines(invoke("watch", "03100"))
+    assert [(o["overdue"], o["next_station"]["code"]) for o in out] == [(False, "04040"), (True, "04040"),
+                                                                        (False, "71801")]
+    assert "has already passed" in out[1]["notice"]  # 10:36 is within the 5-minute grace; 10:38 isn't

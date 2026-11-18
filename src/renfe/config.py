@@ -45,6 +45,15 @@ FARE_BATCH = 3  # trains per journey-search call, as the web app sends them (Ren
 FARE_WORKERS = 3  # journey-search calls in flight at once, as the web app keeps them (2026-11-15)
 EXCLUDED_PRODUCT_TYPES = ("DG", "BK")  # sent by the web app on every search; meaning unconfirmed
 
+# Renfe's live map of long- and medium-distance trains, the public JSON its map page reads (no key, no session;
+# Cache-Control: max-age=30, 2026-11-18). It lists trains only while they run, and is often unreachable from Spain.
+LIVE_MAP_URL = "https://tiempo-real.largorecorrido.renfe.com/renfe-visor/flotaLD.json"
+LIVE_TIMEOUT = 10.0  # how long `status` and `watch` wait for the map
+LIVE_SEARCH_BUDGET = 2.5  # seconds from its start a search for today waits for the map, which it fetches alongside
+WATCH_INTERVAL = 120.0  # seconds between `watch`'s checks (Renfe caches the map's answer for 30 s)
+WATCH_LIMIT = 12 * 3600.0  # `watch` ends on its own after this: the map doesn't show a trip's end
+WATCH_MAX_UNREADABLE = 3  # answers in a row that aren't the map before `watch` stops (exit 7): it moved or changed
+
 STATIONS_TTL = 24 * 3600
 CACHE_ENV = "RENFE_CACHE_DIR"
 

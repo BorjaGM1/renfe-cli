@@ -1,4 +1,5 @@
-"""Against the real Renfe API and legacy shop (anonymous, public data). Skipped unless RENFE_LIVE=1; ~10 requests."""
+"""Against the real Renfe API, legacy shop and live map (anonymous, public data). Skipped unless RENFE_LIVE=1;
+about 11 requests."""
 
 import os
 from datetime import date, timedelta
@@ -7,6 +8,8 @@ import pytest
 
 from renfe import config, search, stations
 from renfe.client import RsvClient
+
+REAL_SHIPPED = stations.bundled  # the real list; conftest gives every test a fake one
 
 pytestmark = [
     pytest.mark.live,
@@ -36,3 +39,22 @@ def test_live_legacy_shop_lists_trains_with_fares():
     assert out["notice"] is None, out["notice"]  # a notice here means it fell back to the new system
     assert out["count"] > 0 and out["fares_included"] is True
     assert any(t["available"] and t["fares"] for t in out["trains"]), "no train on sale came back with fares"
+
+
+def test_live_status_of_a_train_on_the_map():
+    """One request to Renfe's live map. Skips, not fails, when it doesn't answer (often, from Spain) or is empty
+    (at night)."""
+    from renfe import live
+    from renfe.errors import UpstreamError
+
+    try:
+        board = live.fetch()
+    except UpstreamError as err:
+        pytest.skip(f"Renfe's live map didn't answer: {err.message}")
+    if not board.trains:
+        pytest.skip("Renfe's live map lists no trains right now (night)")
+    names = {s.code: s.name for s in REAL_SHIPPED()}
+    listed = [live.status(board, number, names) for number in board.trains]
+    assert all(out["on_map"] for out in listed)
+    assert any(isinstance(out["delay_minutes"], int) for out in listed), "no train on the map has a readable delay"
+    assert any(out["next_station"] and out["next_station"]["name"] for out in listed), "no next station has a name"
