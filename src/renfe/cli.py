@@ -18,7 +18,8 @@ try:  # Typer >= 0.29 vendors Click; older Typer uses the click package
 except ImportError:  # pragma: no cover
     from click import exceptions as click_exceptions
 
-from . import checkout as checkout_mod, config, live, package_version, search as search_mod, shop as shop_mod, stations as stations_mod
+from . import checkout as checkout_mod, config, delays as delays_mod, live, package_version
+from . import search as search_mod, shop as shop_mod, stations as stations_mod
 from .client import RsvClient
 from .errors import ApiShapeError, RenfeError, UpstreamError, UsageError
 from .output import render, render_error
@@ -229,6 +230,18 @@ def _train_number(text: str) -> str:
         raise UsageError(f"TRAIN must be one train number such as 03081; for a train with a change, one leg's "
                          f"(got {text!r})")
     return parts[0]
+
+
+@app.command("delays")
+def delays_cmd() -> None:
+    """List every delayed train on Renfe's live map with its scheduled departure and arrival, most delayed first."""
+
+    def produce() -> dict:
+        with _client() as client:
+            board = live.fetch(transport=client.transport, retries=client.retries)
+            return delays_mod.report(board, _names(), transport=client.transport, retries=client.retries)
+
+    _emit(produce)
 
 
 @app.command("status")
