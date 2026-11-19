@@ -11,14 +11,13 @@ __pycache__/
 .pytest_cache/
 dist/
 
-# Internal — kept local, not published
+# Local notes, never published
 /docs/
-/verify_phase0.py
 
 # Downloaded tickets / invoices / partial downloads
 *.pdf
 *.pkpass
 *.part
 
-# Playwright MCP snapshots (recon only)
+# Playwright MCP snapshots
 .playwright-mcp/
