@@ -1,37 +1,125 @@
 # renfe-cli
 
-Search Renfe trains and fares from the terminal. It talks directly to Renfe's own web API, the same
-anonymous way the website does before anyone signs in; for trips before 25 Jan 2027, to Renfe's legacy
-shop, as a guest. No account, no browser to search, and JSON output. For trips on the legacy shop,
-`renfe checkout` takes you through guest checkout in Chrome.
-`renfe open` opens either shop in your default browser.
+[![CI](https://github.com/luisgonzaleznf/renfe-cli/actions/workflows/ci.yml/badge.svg)](https://github.com/luisgonzaleznf/renfe-cli/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](pyproject.toml)
 
-> Unofficial. Renfe's API is undocumented and can change without notice. The CLI sends what the
-> website sends, no more: one timetable call, then fares 3 trains per call with at most 3 calls in
-> flight; before 25 Jan 2027, the four requests the legacy shop's results page makes. If Renfe blocks
-> or rate-limits it, it stops and says so (exit 5); before 25 Jan 2027 it falls back instead (see
-> below). What it retries: a one-off failure (a 500, 502, 503 or 504 with a JSON or empty body, or a
-> connection that drops or is refused), up to 3 tries per request, 1 s and 2 s apart, listed in the
-> output's `retries`; one of those 3 tries can be the resend when Renfe rejects a saved session with 401
-> (see below). An HTML page at any status is taken for bot protection and tried once; so are a block, a
-> rate limit and a timeout. The legacy shop has its own rule (below).
-> Live delays come from Renfe's public live train map. The network-wide
-> `delays` command also downloads Renfe's public timetable when it needs to look up scheduled times.
-> [Delays](#delays)
+Search Renfe trains and fares, and follow live delays, from the terminal. Every command prints JSON, so
+scripts and AI agents can use it as easily as people. No account, no API key, and no browser to search.
 
-## Use
+> **Unofficial.** Not affiliated with, endorsed by or supported by Renfe. The CLI talks directly to
+> Renfe's own web API, the same anonymous way the website does before anyone signs in. That API is
+> undocumented and can change without notice.
+
+## Features
+
+- **Trains and fares** for a route and date, up to a year ahead: times, duration, changes and every fare
+  for one adult, cheapest first. For trips before 25 Jan 2027 it asks Renfe's legacy shop as a guest, so
+  no train is missing.
+- **Live delays** from Renfe's public train map: one train (`status`), a JSON line whenever it changes
+  (`watch`), or every delayed train on the network with its scheduled times (`delays`).
+- **The number on your ticket works.** A train can run under another number for part of its route;
+  `status`, `watch` and `delays` find the live train either way.
+- **About 1,400 stations ship with the CLI**, matched by name (accents and case ignored) or code, with
+  spelling suggestions for a typo.
+- **Buy on Renfe's website.** `renfe open` opens the right shop with the route filled in. For trips on
+  the legacy shop, `renfe checkout` takes you through guest checkout in Chrome.
+- **Gentle with Renfe.** It sends what the website sends, retries only one-off failures, and stops when
+  Renfe blocks it.
+
+## Install
+
+You need Python 3.12 or later and [uv](https://docs.astral.sh/uv/).
 
 ```sh
-uv run renfe search Madrid Barcelona --date 2027-01-29
-uv run renfe search Atocha Sants -d tomorrow --after 17:00 --arrive-by 22:00 --limit 5
-uv run renfe search MADRI BARCE -d 2027-02-05 --no-fares   # timetable only
-uv run renfe stations sevilla                             # find a station or its code
-uv run renfe open Madrid Barcelona -d 2027-01-29 --train 03081   # buy it on Renfe's website
-uv run renfe delays                                       # delayed trains, with scheduled endpoint times
-uv run renfe delays 37432                                 # a delayed train using this number on any verified section
-uv run renfe status 03081                                 # that train's live delay and next station
-uv run renfe watch 03081                                  # a JSON line each time that changes
+uv tool install git+https://github.com/luisgonzaleznf/renfe-cli
+renfe --help
 ```
+
+It isn't on PyPI yet. The `renfe-cli` package on PyPI is a different project, so `pip install renfe-cli`
+won't install this one.
+
+## Quick start
+
+```sh
+renfe stations sevilla                                   # find a station or its code
+renfe search Madrid Barcelona --date 2027-01-29
+renfe search Atocha Sants -d tomorrow --after 17:00 --arrive-by 22:00 --limit 5
+renfe search MADRI BARCE -d 2027-02-05 --no-fares        # timetable only
+renfe open Madrid Barcelona -d 2027-01-29 --train 03081  # buy it on Renfe's website
+renfe delays                                             # delayed trains, with scheduled endpoint times
+renfe delays 37432                                       # a delayed train using this number on any verified section
+renfe status 03081                                       # that train's live delay and next station
+renfe watch 03081                                        # a JSON line each time that changes
+```
+
+A search prints one JSON document. This one ran on 19 Nov 2026 with `--after 08:00 --limit 2`; the second
+train is left out here:
+
+```json
+{
+  "date": "2027-01-29",
+  "origin": {"code": "MADRI", "name": "Madrid (Todas)", "province": "Madrid", "group": true, "main": true},
+  "destination": {"code": "BARCE", "name": "Barcelona (Todas)", "province": "Barcelona", "group": true, "main": true},
+  "passengers": {"adults": 1},
+  "fares_included": true,
+  "notice": null,
+  "count": 2,
+  "trains": [
+    {
+      "service": "03091",
+      "type": "AVE",
+      "type_code": "AV1",
+      "departure": "2027-01-29T08:57:00+01:00",
+      "arrival": "2027-01-29T12:06:00+01:00",
+      "duration_minutes": 189,
+      "changes": 0,
+      "available": true,
+      "fares": [
+        {"name": "Básico", "price": 44.07, "currency": "EUR"},
+        {"name": "Elige", "price": 48.48, "currency": "EUR"},
+        {"name": "Elige Confort", "price": 52.77, "currency": "EUR"},
+        {"name": "Premium", "price": 71.77, "currency": "EUR"}
+      ],
+      "intermediate_stops": 1,
+      "delay_minutes": null
+    }
+  ],
+  "shop": {
+    "url": "https://venta.rsv.renfe.com/coext/search?originUicStationCode=MADRI&destinationUicStationCode=BARCE&isOneWay=true",
+    "prefilled": ["origin", "destination", "one_way"],
+    "next": "Pick 2027-01-29 as the date (Renfe's new shop doesn't take one in a link), press 'Buscar billetes' and pick your train."
+  },
+  "delays_included": false,
+  "retries": []
+}
+```
+
+So it pipes straight into other tools:
+
+```sh
+renfe search Madrid Barcelona -d 2027-01-29 --after 08:00 --limit 2 \
+  | jq -r '.trains[] | "\(.departure[11:16]) \(.service) \(.type) from \(.fares[0].price) €"'
+# 08:57 03091 AVE from 44.07 €
+# 09:27 03093 AVE from 49.8 €
+```
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `renfe stations [QUERY]` | Stations and city groups matching a name or code, best match first |
+| `renfe search FROM TO` | Trains on a date, with times, changes and fares for one adult; for today, live delays too |
+| `renfe open FROM TO` | Opens Renfe's shop for that search in your browser, or prints the link |
+| `renfe checkout FROM TO` | Guest checkout in Chrome, for trips before 25 Jan 2027 |
+| `renfe delays [TRAIN]` | Every delayed train on the live map, with its scheduled departure and arrival |
+| `renfe status TRAIN` | One train's live delay, its next station and the expected arrival there |
+| `renfe watch TRAIN` | A JSON line each time that train's live status changes |
+
+Every command has `--help`. stdout is always JSON (JSON Lines for `watch`), and errors go to stderr with
+the exit codes in [Output and errors](#output-and-errors).
+
+## Searching
 
 `search` returns, for each train:
 - service number and `type_code`, plus `type` (AVE, Intercity…) when fares are fetched; a train
@@ -53,7 +141,87 @@ command fails after retries, the stderr error object carries the same `retries` 
 It also returns `shop`: the page on Renfe's website where that search continues, to pick the train and
 pay.
 
-**Buying.** `renfe open FROM TO -d DATE` opens that page in your browser when run from a terminal
+Dates are YYYY-MM-DD, `today` or `tomorrow`, up to a year ahead. `search` returns at most 10 trains by default
+(`--limit`, up to 200). Fares cost one extra request per 3
+trains. For today, trains that have already left are hidden unless you pass `--after`; before 25 Jan 2027
+the legacy shop can leave them out anyway (see [Delays](#delays)).
+
+`--arrive-by HH:MM` keeps journeys scheduled to reach the destination by that time on the search date
+(Madrid time). An arrival exactly at the deadline qualifies. An arrival after midnight the next day falls
+outside the window. The filter applies before `--limit` and fare requests.
+
+### Stations
+
+Stations are matched by name, ignoring accents and case, or by code. A city name such as `Madrid` means
+all of that city's stations (`MADRI`). Renfe's list of about 1,400 stations ships with the CLI, so
+finding one sends no request. Only a name that matches none of them makes the CLI ask Renfe for its
+current list, in case the station is newer than the shipped one; that list is kept for a day.
+If neither list matches, `stations` returns up to five spelling suggestions from the shipped list.
+For example, `renfe stations Chamartn` suggests Madrid-Chamartín. Use its code or corrected name to search.
+`renfe stations --refresh` asks Renfe directly. The cache folder is `~/.cache/renfe-cli`, or
+`$XDG_CACHE_HOME/renfe-cli`, or `$RENFE_CACHE_DIR` if set.
+
+### Before 25 Jan 2027: Renfe's legacy shop
+
+Renfe is moving to a new sales system, which prices trips
+only from 25 Jan 2027 and before that knows only some trains (for Madrid–Barcelona on Friday 20 Nov 2026,
+8 of the 24). Renfe sells the earlier trips on its legacy shop (venta.renfe.com), so for those dates
+`search` asks the legacy shop, the way its results page does, and gets every train with its fares in the
+same JSON (Madrid–Barcelona on Friday 27 Nov 2026, checked 2026-11-17: 24 trains, cheapest €31.15).
+There, `type_code` and `intermediate_stops` are `null`, and a train that isn't on sale (full, "not on
+sale at the moment", not running, or only wheelchair places left) has `available: false` and no fares.
+`renfe search` only reads the list. Start a booking separately with `renfe checkout`.
+
+A one-off failure at any of the legacy shop's four requests (a 500 or 502 without `Retry-After`, whatever
+its body, or a dropped connection) starts its search over from the first request, with a new guest session
+and fresh cookies, up to 3 tries in all. A 503 or 504 there isn't retried: it may be an edge deny or a
+waiting room. If it still fails (or a block or rate limit, a waiting room or challenge page, or an answer
+the CLI can't read stops it), or it lists no trains, you get the new system's partial list instead, without
+fares, and a `notice` saying what failed; the exit code stays 0. The one exception is today after the last
+departure: the legacy shop lists only trains that haven't left, so when it lists none and the new system
+has no train leaving from now on either, nothing failed, and the only notice is "No more trains today".
+On any other date (or judged by `--after`), an empty list from the legacy shop keeps the fallback notice:
+before 25 Jan the new system lists only part of the timetable, so its being empty too proves little. The
+CLI never tries to get past a waiting room or a captcha. `shop.url` and `renfe open` take you to the full
+list on Renfe's website either way.
+
+From 25 Jan 2027 the CLI's list matches the website's exactly, trains and cheapest fares (checked
+against the web for Friday 29 Jan: 22 trains each).
+
+### Requests, speed and retries
+
+The CLI sends what the
+website sends, no more: one timetable call, then fares 3 trains per call with at most 3 calls in
+flight; before 25 Jan 2027, the four requests the legacy shop's results page makes. If Renfe blocks
+or rate-limits it, it stops and says so (exit 5); before 25 Jan 2027 it falls back instead (see
+[above](#before-25-jan-2027-renfes-legacy-shop)). What it retries: a one-off failure (a 500, 502, 503 or 504 with a JSON or empty body, or a
+connection that drops or is refused), up to 3 tries per request, 1 s and 2 s apart, listed in the
+output's `retries`; one of those 3 tries can be the resend when Renfe rejects a saved session with 401
+(see below). An HTML page at any status is taken for bot protection and tried once; so are a block, a
+rate limit and a timeout. The legacy shop has its own rule (above).
+Live delays come from Renfe's public live train map. The network-wide
+`delays` command also downloads Renfe's public timetable when it needs to look up scheduled times.
+
+Speed (measured 2026-11-15): a search takes about 0.3–0.5 s, and a full day of 22 trains with fares
+about 1.4 s. The anonymous session (a 30-minute token and the site's public API key) is kept in the
+cache folder as `session.json`, so a timetable search usually sends a single request; fares add one per
+3 trains. If Renfe answers 401 to a saved session, the CLI opens a new one and resends that request
+once. A 403 is reported as a block, and the saved session is dropped so the next run starts afresh. A
+500, 502, 503 or 504, or a dropped or refused connection, is tried up to 3 times, 1 s and then 2 s apart
+(a 24-hour soak test on 18 Nov saw single requests fail like that and work again a minute later). The
+401 resend counts as one of those 3 tries and goes at once; a retry after it waits 1 s, as a first retry
+does, and a 403 to a saved session drops the file even on the third try. An HTML page is bot protection
+whatever its status (a 503 page too), and isn't retried. Neither is a timeout: one already costs the whole
+25 s timeout. With no network at all, a search takes a few seconds longer to fail than before (3 s of
+pauses; 6 s before 25 Jan 2027, when the legacy shop is tried first), since a DNS or TLS failure counts as a
+refused connection.
+Before 25 Jan 2027 a search is the legacy shop's four requests instead, about 0.8–1.8 s with fares
+(measured 2026-11-17), and nothing is saved: its cookies live in memory for that one search. A search for
+today also sends one request to Renfe's live map, alongside the others (see [Delays](#delays)).
+
+## Buying
+
+`renfe open FROM TO -d DATE` opens that page in your browser when run from a terminal
 (`--browser` forces it, `--no-browser` only prints the link). Add `--train` to check the train exists
 that day and show it, so you know which one to pick. With `open`, you pick the train and pay on Renfe’s page.
 - **Dates before 25 Jan 2027:** www.renfe.com opens with the route and the date filled in. Mark
@@ -102,66 +270,6 @@ option and checks the displayed total against the €150 minimum. In review mode
 `requested_method: aplazame` and `selected_method: card`. To use installments, choose Aplazame under
 “Otras formas de pago” at the card gateway and review the financing terms there. The provider decides
 approval. [Renfe’s Aplazame instructions](https://www.renfe.com/es/es/viajar/informacion-util/donde-comprar/aplazame)
-
-Dates are YYYY-MM-DD, `today` or `tomorrow`, up to a year ahead. `search` returns at most 10 trains by default
-(`--limit`, up to 200). Fares cost one extra request per 3
-trains. For today, trains that have already left are hidden unless you pass `--after`; before 25 Jan 2027
-the legacy shop can leave them out anyway (see [Delays](#delays)).
-
-`--arrive-by HH:MM` keeps journeys scheduled to reach the destination by that time on the search date
-(Madrid time). An arrival exactly at the deadline qualifies. An arrival after midnight the next day falls
-outside the window. The filter applies before `--limit` and fare requests.
-
-Speed (measured 2026-11-15): a search takes about 0.3–0.5 s, and a full day of 22 trains with fares
-about 1.4 s. The anonymous session (a 30-minute token and the site's public API key) is kept in the
-cache folder as `session.json`, so a timetable search usually sends a single request; fares add one per
-3 trains. If Renfe answers 401 to a saved session, the CLI opens a new one and resends that request
-once. A 403 is reported as a block, and the saved session is dropped so the next run starts afresh. A
-500, 502, 503 or 504, or a dropped or refused connection, is tried up to 3 times, 1 s and then 2 s apart
-(a 24-hour soak test on 18 Nov saw single requests fail like that and work again a minute later). The
-401 resend counts as one of those 3 tries and goes at once; a retry after it waits 1 s, as a first retry
-does, and a 403 to a saved session drops the file even on the third try. An HTML page is bot protection
-whatever its status (a 503 page too), and isn't retried. Neither is a timeout: one already costs the whole
-25 s timeout. With no network at all, a search takes a few seconds longer to fail than before (3 s of
-pauses; 6 s before 25 Jan 2027, when the legacy shop is tried first), since a DNS or TLS failure counts as a
-refused connection.
-Before 25 Jan 2027 a search is the legacy shop's four requests instead, about 0.8–1.8 s with fares
-(measured 2026-11-17), and nothing is saved: its cookies live in memory for that one search. A search for
-today also sends one request to Renfe's live map, alongside the others (see [Delays](#delays)).
-
-**Before 25 Jan 2027: Renfe's legacy shop.** Renfe is moving to a new sales system, which prices trips
-only from 25 Jan 2027 and before that knows only some trains (for Madrid–Barcelona on Friday 20 Nov 2026,
-8 of the 24). Renfe sells the earlier trips on its legacy shop (venta.renfe.com), so for those dates
-`search` asks the legacy shop, the way its results page does, and gets every train with its fares in the
-same JSON (Madrid–Barcelona on Friday 27 Nov 2026, checked 2026-11-17: 24 trains, cheapest €31.15).
-There, `type_code` and `intermediate_stops` are `null`, and a train that isn't on sale (full, "not on
-sale at the moment", not running, or only wheelchair places left) has `available: false` and no fares.
-`renfe search` only reads the list. Start a booking separately with `renfe checkout`.
-
-A one-off failure at any of the legacy shop's four requests (a 500 or 502 without `Retry-After`, whatever
-its body, or a dropped connection) starts its search over from the first request, with a new guest session
-and fresh cookies, up to 3 tries in all. A 503 or 504 there isn't retried: it may be an edge deny or a
-waiting room. If it still fails (or a block or rate limit, a waiting room or challenge page, or an answer
-the CLI can't read stops it), or it lists no trains, you get the new system's partial list instead, without
-fares, and a `notice` saying what failed; the exit code stays 0. The one exception is today after the last
-departure: the legacy shop lists only trains that haven't left, so when it lists none and the new system
-has no train leaving from now on either, nothing failed, and the only notice is "No more trains today".
-On any other date (or judged by `--after`), an empty list from the legacy shop keeps the fallback notice:
-before 25 Jan the new system lists only part of the timetable, so its being empty too proves little. The
-CLI never tries to get past a waiting room or a captcha. `shop.url` and `renfe open` take you to the full
-list on Renfe's website either way.
-
-From 25 Jan 2027 the CLI's list matches the website's exactly, trains and cheapest fares (checked
-against the web for Friday 29 Jan: 22 trains each).
-
-Stations are matched by name, ignoring accents and case, or by code. A city name such as `Madrid` means
-all of that city's stations (`MADRI`). Renfe's list of about 1,400 stations ships with the CLI, so
-finding one sends no request. Only a name that matches none of them makes the CLI ask Renfe for its
-current list, in case the station is newer than the shipped one; that list is kept for a day.
-If neither list matches, `stations` returns up to five spelling suggestions from the shipped list.
-For example, `renfe stations Chamartn` suggests Madrid-Chamartín. Use its code or corrected name to search.
-`renfe stations --refresh` asks Renfe directly. The cache folder is `~/.cache/renfe-cli`, or
-`$XDG_CACHE_HOME/renfe-cli`, or `$RENFE_CACHE_DIR` if set.
 
 ## Delays
 
@@ -287,7 +395,7 @@ retries, once per outage, after which the next answer prints a line whether or n
 itself:
 
 ```sh
-uv run renfe watch 03081 | while read -r line; do
+renfe watch 03081 | while read -r line; do
   case "$line" in
     *'"event": "map_unreachable"'*) msg="Renfe's live map isn't answering: delay unknown for now" ;;
     *'"event": "ended"'*) msg="renfe watch has stopped" ;;
@@ -319,15 +427,29 @@ lines). Errors go to stderr as `{"error": {...}}`, with these exit codes:
 | `5` | blocked or upstream: 403/429, a bot page, timeout or 5xx, including Renfe's live map for `delays` and `status` (for `watch`, only a block or rate limit). If this happens while fetching fares, stdout still has the timetable (plus `fares_error`). On the legacy shop it falls back instead (exit 0, `notice`) |
 | `7` | API changed |
 
-## Develop
+## Contributing
+
+Issues and pull requests are welcome. To work on the code:
 
 ```sh
+git clone https://github.com/luisgonzaleznf/renfe-cli
+cd renfe-cli
 uv sync
-uv run pytest                      # offline: HTTP is mocked
+python3 .githooks/pii_check.py enable   # once per clone: the personal-data guard (below)
+uv run renfe --help                     # your working copy
+uv run pytest                           # offline: HTTP is mocked
 RENFE_TEST_CHROME=1 uv run --extra checkout pytest tests/test_checkout.py  # offline, installed Chrome
-RENFE_LIVE=1 uv run pytest -m live # about 10 real requests, plus one to the live map
+RENFE_LIVE=1 uv run pytest -m live      # about 10 real requests, plus one to the live map
 uv run python scripts/update_stations.py  # refresh the shipped station list; prints what changed
 ```
+
+- Keep tests offline: HTTP is mocked. A test that calls Renfe gets the `live` marker, so it runs only with
+  `RENFE_LIVE=1`.
+- Scripts and agents read the output, so add JSON fields rather than renaming or removing them.
+- Never commit real passenger or booking data, captures (HAR files), tickets or tokens. Use obviously fake
+  values in tests.
+
+CI runs the offline suite on Linux and macOS, with Python 3.12 and 3.13, for every pull request.
 
 A scheduled workflow (`.github/workflows/stations-reminder.yml`) opens an issue to refresh the station
 list on 1 February and 1 August. GitHub turns schedules off in a public repo after 60 days without
@@ -336,3 +458,9 @@ activity; re-enable it from the Actions tab, or run it from there by hand.
 Personal-data guard: `.githooks/` checks staged changes and commit messages for passengers' and
 buyers' data (names, DNI/NIE, emails, phones, booking locators, card numbers) and for capture files.
 Enable it once per clone with `python3 .githooks/pii_check.py enable`.
+
+## License
+
+[MIT](LICENSE). The station list and train-number groups in `src/renfe/data/` come from Renfe's own
+data and aren't covered by the MIT license. Renfe is a trademark of its owner; this project uses the name
+only to say which service it works with.
