@@ -108,11 +108,11 @@ def _parse_date(text: str) -> date:
     return day
 
 
-def _parse_time(text: str | None) -> time | None:
+def _parse_time(text: str | None, option: str) -> time | None:
     if text is None:
         return None
     if not re.fullmatch(r"([01]?\d|2[0-3]):[0-5]\d", text.strip()):
-        raise UsageError(f"--after must be HH:MM (got {text!r})")
+        raise UsageError(f"{option} must be HH:MM (got {text!r})")
     hours, minutes = text.strip().split(":")
     return time(int(hours), int(minutes))
 
@@ -149,7 +149,10 @@ def stations_cmd(
         if not found:  # asked to, or nothing in the shipped list matches: Renfe's live list
             with _client() as client:
                 found = pick(stations_mod.load(client, refresh=refresh))
-        return {"query": query, "count": len(found), "stations": [s.to_dict() for s in found]}
+        out = {"query": query, "count": len(found), "stations": [s.to_dict() for s in found]}
+        if not found:
+            out["suggestions"] = [s.to_dict() for s in stations_mod.suggestions(query or "")]
+        return out
 
     _emit(produce)
 
@@ -177,6 +180,8 @@ def search_cmd(
     date_: Annotated[str, typer.Option("--date", "-d", help="Travel date: YYYY-MM-DD, today or tomorrow.")] = "today",
     after: Annotated[str | None, typer.Option(
         help="Only trains leaving at or after HH:MM, local time (today: defaults to now).")] = None,
+    arrive_by: Annotated[str | None, typer.Option(
+        help="Only trains scheduled to arrive by HH:MM on the search date, Madrid time.")] = None,
     fares: Annotated[bool, typer.Option(help="Also fetch fares (one extra request per 3 trains).")] = True,
     limit: Annotated[int, typer.Option(min=1, max=200, help="Most trains to return, earliest first.")] = 10,
 ) -> None:
@@ -184,19 +189,15 @@ def search_cmd(
     legacy shop). For today, also each train's live delay, from Renfe's live train map."""
 
     def produce() -> dict:
-        day, after_time = _parse_date(date_), _parse_time(after)
+        day, after_time = _parse_date(date_), _parse_time(after, "--after")
+        arrival_time = _parse_time(arrive_by, "--arrive-by")
         now = datetime.now(search_mod.MADRID)
         today = day == now.date()
-        hide_departed = after_time is None and today
-        if hide_departed:  # don't list trains that have already left
-            after_time = now.time().replace(second=0, microsecond=0)
         with _client() as client:
             src, dst = _stations(client, origin, destination)
             delays = live.in_background(client.transport) if today else None  # runs alongside the search
             out = search_mod.search(client, src, dst, day, names=_names(src, dst), after=after_time, fares=fares,
-                                    limit=limit, now=now)
-        if hide_departed and out["count"] == 0:
-            _add_notice(out, f"No more trains today after {after_time.strftime('%H:%M')}; try --date tomorrow.")
+                                    arrive_by=arrival_time, limit=limit, now=now, from_now=today and after_time is None)
         board, why, map_retries = delays() if delays else (None, None, [])
         try:
             live.annotate(out["trains"], board)
@@ -273,31 +274,37 @@ def _line(payload: dict) -> None:
 
 @app.command("watch")
 def watch_cmd(
-    train: Annotated[str, typer.Argument(help="A train number from `renfe search`, e.g. 03081.")],
+    train: Annotated[str, typer.Argument(help="A live train number or a ticket number, e.g. 03081.")],
 ) -> None:
-    """Check a train's live delay every 2 minutes. Prints one JSON line, shaped like `renfe status`, on the first
-    check and whenever its delay, its next station or the expected arrival there, `overdue` (held past that
-    arrival) or its being on the map changes; an `event` line when the map stops answering and when the watch
-    ends. Ends after 12 hours, or on Ctrl-C."""
+    """Check a live or ticket number every 2 minutes. Print a JSON line shaped like `renfe status` on the first
+    check and whenever the train's delay, next station, expected arrival there, overdue flag or presence changes.
+    A ticket lookup lists multiple verified partners in `matching_trains`. If the timetable fails, a line
+    explains why partner lookup is unavailable for the rest of the watch. If the requested number appears
+    after a partner, print its status and follow it. Events report map outages and the 12-hour time limit.
+    Press Ctrl-C to stop early."""
     try:
         number = _train_number(train)
     except UsageError as err:
         _fail(err)
-    names, last, unreadable = _names(), None, 0
+    last, unreadable, last_matches = None, 0, None
+    reported_unavailable = False
     deadline = _clock() + config.WATCH_LIMIT
     try:
         with _client() as client:
+            watch = delays_mod.Watch(number, _names(), client.transport)
             while True:
                 retried: list[dict] = []  # this check's: not carried to later lines
                 try:
-                    now = live.status(live.fetch(transport=client.transport, retries=retried), number, names, retried)
+                    board = live.fetch(transport=client.transport, retries=retried)
+                    previous_pin = watch.pinned
+                    now = watch.check(board, retried)
                 except (UpstreamError, ApiShapeError) as err:  # a hiccup: one line per outage, and it keeps watching
                     unreadable = unreadable + 1 if isinstance(err, ApiShapeError) else 0
                     if unreadable >= config.WATCH_MAX_UNREADABLE:
                         err.retries = retried
                         _fail(err)  # answer after answer isn't the map: it has moved or changed
                     if last is not _OUTAGE:
-                        _line({"train": number.zfill(5), "event": "map_unreachable", "error": err.to_dict(),
+                        _line({**watch.event_numbers(), "event": "map_unreachable", "error": err.to_dict(),
                                "retries": retried})
                         last = _OUTAGE  # so the first answer after it prints a line, changed or not
                 except RenfeError as err:  # blocked or rate-limited: stop, as every command does
@@ -310,12 +317,19 @@ def watch_cmd(
                     nxt = now["next_station"] or {}
                     seen = (now["on_map"], now["delay_minutes"], nxt.get("code"), nxt.get("expected_arrival"),
                             now["overdue"])
-                    if seen != last:
+                    matches = now.get("matching_trains")
+                    unavailable = now["schedule_match"] == "unavailable"
+                    if (seen != last or watch.pinned != previous_pin or (matches and matches != last_matches)
+                            or (unavailable and not reported_unavailable)):
                         _line(now)
                         last = seen
+                        if matches:
+                            last_matches = matches
+                        if unavailable:
+                            reported_unavailable = True
                 left = deadline - _clock()
                 if left <= 0:
-                    _line({"train": number.zfill(5), "event": "ended",
+                    _line({**watch.event_numbers(), "event": "ended",
                            "message": f"watched for {config.WATCH_LIMIT / 3600:g} h; run it again to keep watching"})
                     return
                 _sleep(min(config.WATCH_INTERVAL, left))
@@ -354,14 +368,17 @@ def open_cmd(
                 if found["notice"]:
                     notices.append(found["notice"])
                 if chosen is None and not found["notice"]:
-                    raise UsageError(f"no train {train} from {src.name} to {dst.name} on {day.isoformat()}; "
-                                     "`renfe search` lists them")
+                    message = f"no train {train} from {src.name} to {dst.name} on {day.isoformat()}; `renfe search` lists them"
+                    if day == datetime.now(search_mod.MADRID).date() and day < config.NSV_FIRST_SALE_DATE:
+                        message += ". The legacy shop stops listing a train after it leaves the searched station."
+                    raise UsageError(message)
                 if chosen is None:
                     notices.append(f"Train {train} isn't in the list this CLI can see for {day.isoformat()}, "
                                    "which is incomplete; look for it on Renfe's page.")
                 elif datetime.fromisoformat(chosen["departure"]) < datetime.now(search_mod.MADRID):
-                    notices.append(f"Train {chosen['service']} has already left "
-                                   f"({chosen['departure'][11:16]}).")
+                    first_leg = chosen["service"].split("+")[0].strip()
+                    notices.append(f"Train {chosen['service']} was scheduled to leave at {chosen['departure'][11:16]}, "
+                                   f"which has passed. Check `renfe status {first_leg}` for its reported delay.")
         page = shop_mod.link(src, dst, day)
         launch = _stdout_is_terminal() if browser is None else browser  # scripts and agents: link only
         opened = shop_mod.open_in_browser(page["url"]) if launch else False

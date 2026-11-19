@@ -23,7 +23,7 @@ shop, as a guest. No account, no browser to search, and JSON output. For trips o
 
 ```sh
 uv run renfe search Madrid Barcelona --date 2027-01-29
-uv run renfe search Atocha Sants -d tomorrow --after 17:00 --limit 5
+uv run renfe search Atocha Sants -d tomorrow --after 17:00 --arrive-by 22:00 --limit 5
 uv run renfe search MADRI BARCE -d 2027-02-05 --no-fares   # timetable only
 uv run renfe stations sevilla                             # find a station or its code
 uv run renfe open Madrid Barcelona -d 2027-01-29 --train 03081   # buy it on Renfe's website
@@ -108,6 +108,10 @@ Dates are YYYY-MM-DD, `today` or `tomorrow`, up to a year ahead. `search` return
 trains. For today, trains that have already left are hidden unless you pass `--after`; before 25 Jan 2027
 the legacy shop can leave them out anyway (see [Delays](#delays)).
 
+`--arrive-by HH:MM` keeps journeys scheduled to reach the destination by that time on the search date
+(Madrid time). An arrival exactly at the deadline qualifies. An arrival after midnight the next day falls
+outside the window. The filter applies before `--limit` and fare requests.
+
 Speed (measured 2026-11-15): a search takes about 0.3–0.5 s, and a full day of 22 trains with fares
 about 1.4 s. The anonymous session (a 30-minute token and the site's public API key) is kept in the
 cache folder as `session.json`, so a timetable search usually sends a single request; fares add one per
@@ -154,6 +158,8 @@ Stations are matched by name, ignoring accents and case, or by code. A city name
 all of that city's stations (`MADRI`). Renfe's list of about 1,400 stations ships with the CLI, so
 finding one sends no request. Only a name that matches none of them makes the CLI ask Renfe for its
 current list, in case the station is newer than the shipped one; that list is kept for a day.
+If neither list matches, `stations` returns up to five spelling suggestions from the shipped list.
+For example, `renfe stations Chamartn` suggests Madrid-Chamartín. Use its code or corrected name to search.
 `renfe stations --refresh` asks Renfe directly. The cache folder is `~/.cache/renfe-cli`, or
 `$XDG_CACHE_HOME/renfe-cli`, or `$RENFE_CACHE_DIR` if set.
 
@@ -179,6 +185,8 @@ scheduled departure and arrival for that stretch. A single train still counts on
 for example, `00632` ran from Zaragoza to Salamanca. `37632` covered Miranda de Ebro to Valladolid,
 and `37432` covered Valladolid to Salamanca. All three searches returned the same live report.
 The network totals still cover the whole map. `matched_trains` counts the rows returned by the filter.
+`schedule_matches` counts exact, linked, ambiguous, unmatched and unavailable schedules among the
+returned rows. Add `exact` and `linked` to get the number with scheduled departure and arrival times.
 
 Renfe's published groupings supply candidate numbers. The CLI checks active services on the run date,
 including when a train arrives after midnight. A shared stretch must have matching stations, direction
@@ -199,14 +207,19 @@ page (`tiempo-real.largorecorrido.renfe.com`, no key or session). TRAIN is a num
 (`03081`, leading zeros optional); for a train with a change, one leg's number. It returns
 `delay_minutes` (negative: early), the train's origin and destination, its previous and next station (with
 the expected arrival there), `overdue`, `reported_at`, `map_updated` and `retries` (as in `search`, for the
-map's request). `reported_at` is the time on the
+map or timetable request). `reported_at` is the time on the
 train's entry; Renfe refreshes it every few minutes even when the entry's delay and stations are hours old,
 so it doesn't show how fresh they are.
+
+Every status includes `requested_train`, `scheduled_departure`, `scheduled_arrival`, `schedule_match` and
+`number_segments`. A direct map hit takes priority and uses the same timetable matching as `delays`. If
+the timetable fails, the live result still prints with `schedule_match: "unavailable"` and the reason in
+`notice`. Unknown times are null and unknown sections are an empty array.
 
 When a ticket number is absent from the map but a published partner number is present, `renfe status TRAIN`
 checks the timetable for a matching section. A unique match includes the ticket number in `requested_train`
 and the live number in `train`, including for early and on-time trains. When several live trains match,
-`matching_trains` lists them and the delay is unknown. `renfe watch` takes the live number from `train`.
+`matching_trains` lists them and the delay is unknown.
 
 - **While it runs, and mainly long- and medium-distance trains.** The map lists trains around the time they
   run (some while still at their first station), and at night it is empty. A train that isn't on it has
@@ -257,7 +270,17 @@ output, on the first check and whenever the train's delay, its next station, the
 is the finer signal: on 18 Nov from 06:29 to 06:59 it moved 264 times with the delay and next station
 unchanged, mostly by a minute either way, and a train on the map throughout gave about 10 lines in those
 30 minutes (at most 15). It keeps checking a train that isn't on the map yet, so you can start it before
-departure. Each line has that check's `retries`, which don't count as a change. Two other lines carry an
+departure. A ticket number works too. When a published partner appears, the watch verifies its section
+against the timetable. Several matches produce a line listing `matching_trains`. Once one partner matches,
+the watch follows it even if another partner appears later. If the exact number you requested appears, the
+watch prints its status and follows that number for the rest of the watch.
+
+The watch loads the timetable at most once. If that load fails during ticket lookup, one line gives the
+reason. The watch can still follow the exact number on the map, but it cannot match the ticket to a partner
+for the rest of that watch. Status lines carry the same schedule fields as `renfe status`. Event lines
+include `requested_train` only while the watch is following a different live number.
+
+Each status line has that check's `retries`, which don't count as a change. Two other lines carry an
 `event` instead: `map_unreachable` (with the `error` and `retries`) when the map stops answering, after its
 retries, once per outage, after which the next answer prints a line whether or not anything changed; and
 `ended` when the watch stops on its own. Pipe it into whatever pings you; the CLI sends no notifications

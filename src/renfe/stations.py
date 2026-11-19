@@ -16,6 +16,7 @@ import time
 import unicodedata
 from dataclasses import dataclass
 from datetime import date
+from difflib import SequenceMatcher
 from importlib import resources
 from pathlib import Path
 
@@ -137,6 +138,26 @@ def find(query: str, stations: list[Station], limit: int = 20) -> list[Station]:
     return [s for _, s in scored[:limit]]
 
 
+def suggestions(query: str) -> list[Station]:
+    """Nearby spellings in the shipped list. These are hints, never resolved station choices."""
+    tokens = [token for token in _norm(query).split() if len(token) >= 3]
+    if not tokens:
+        return []
+
+    @functools.cache
+    def similarity(token: str, word: str) -> float:
+        return SequenceMatcher(None, token, word).ratio()
+
+    ranked = []
+    for station in bundled():
+        words = _norm(station.name).split()
+        scores = [max((similarity(token, word) for word in words), default=0) for token in tokens]
+        if min(scores) >= 0.8:
+            ranked.append((station, sum(scores)))
+    ranked.sort(key=lambda hit: (not hit[0].group, not hit[0].main, -hit[1], len(hit[0].name), hit[0].name, hit[0].code))
+    return [station for station, _ in ranked[:5]]
+
+
 def resolve(query: str, stations: list[Station]) -> Station:
     """The one station `query` means (a code or a name), or a UsageError listing the candidates."""
     scored = [(r, s) for s in stations if (r := _rank(query, s)) is not None]
@@ -157,4 +178,12 @@ def lookup(query: str, client: RsvClient) -> Station:
     try:
         return resolve(query, bundled())
     except NoMatch:
+        pass
+    try:
         return resolve(query, load(client))
+    except NoMatch as err:
+        nearby = suggestions(query)
+        if nearby:
+            choices = ", ".join(f"{s.name} ({s.code})" for s in nearby)
+            raise NoMatch(f"{err.message}. Did you mean {choices}?") from None
+        raise

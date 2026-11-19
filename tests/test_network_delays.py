@@ -1,34 +1,14 @@
 """Exercise the network report through the CLI with a synthetic map and GTFS archive."""
 
-import io
 import json
 import os
-import zipfile
 
 import httpx
 import pytest
 from typer.testing import CliRunner
 
-from fakes import FakeRenfe, live_map, map_train
+from fakes import FakeRenfe, live_map, map_train, timetable
 from renfe import cli, config, delays
-
-
-def timetable(trips="", stops="", calendar=None, exceptions="daily,20270129,1"):
-    tables = {
-        "trips": ("service_id,trip_short_name,trip_id", trips),
-        "stop_times": ("trip_id,stop_sequence,stop_id,arrival_time,departure_time", stops),
-    }
-    if calendar is not None:
-        tables["calendar"] = ("start_date,end_date,monday,tuesday,wednesday,thursday,friday,saturday,sunday,service_id",
-                              calendar)
-    if exceptions is not None:
-        tables["calendar_dates"] = ("service_id,date,exception_type", exceptions)
-    data = io.BytesIO()
-    with zipfile.ZipFile(data, "w", zipfile.ZIP_DEFLATED) as archive:
-        for table, (header, rows) in tables.items():
-            lines = [header, *rows.splitlines()]
-            archive.writestr(table + ".txt", "".join(line + "    \r\n" for line in lines))
-    return data.getvalue()
 
 
 def route(trip, departure="09:00:00", arrival="12:00:00", origin="60000", destination="71801"):
@@ -64,6 +44,7 @@ def test_lists_every_positive_delay_with_counts_and_one_shared_timetable(monkeyp
     assert [report[key] for key in ("mapped_trains", "delayed", "on_time", "early", "unknown")] == [6, 3, 1, 1, 1]
     assert report["map_updated"] == "2027-01-29T09:30:00+01:00" and report["notice"] is None
     assert report["retries"] == []
+    assert report["schedule_matches"] == {"exact": 1, "linked": 0, "ambiguous": 0, "unmatched": 2, "unavailable": 0}
     assert [row["train"] for row in report["trains"]] == ["00007", "00002", "03100"]
     missing, _, row = report["trains"]
     assert missing["schedule_match"] == "unmatched"
@@ -215,6 +196,7 @@ def test_live_and_ticket_numbers_find_the_same_row_with_verified_sections(monkey
         filtered = run(number)
         assert filtered["requested_train"] == number.zfill(5)
         assert (filtered["mapped_trains"], filtered["delayed"], filtered["matched_trains"]) == (2, 2, 1)
+        assert filtered["schedule_matches"]["exact"] == sum(filtered["schedule_matches"].values()) == 1
         assert filtered["trains"] == [row]
     assert len([r for r in fake.requests if str(r.url) == delays.TIMETABLE_URL]) == 1
     assert run("11111")["trains"][0]["number_segments"] == []  # Direct live number with no timetable.
@@ -283,9 +265,10 @@ def test_ticket_number_status_also_finds_an_on_time_train(monkeypatch):
                    timetable(trips, stops))
     runner = CliRunner()
     direct = json.loads(runner.invoke(cli.app, ["status", "632"]).stdout)
-    assert direct["train"] == "00632" and len(fake.requests) == 1
+    assert direct["train"] == direct["requested_train"] == "00632" and len(fake.requests) == 2
     status = json.loads(runner.invoke(cli.app, ["status", "37432"]).stdout)
     assert status["on_map"] and status["train"] == "00632" and status["requested_train"] == "37432"
+    assert status == {**direct, "requested_train": "37432"} and direct["schedule_match"] == "exact"
     assert status["delay_minutes"] == 0 and len(fake.requests) == 3
     assert run("37432")["trains"] == []
 
@@ -326,3 +309,16 @@ def test_timetable_failure_keeps_direct_results_and_explains_missing_ticket_look
     status = CliRunner().invoke(cli.app, ["status", "37432"])
     out = json.loads(status.stdout)
     assert status.exit_code == 0 and out["delay_minutes"] is None and "lookup unavailable" in out["notice"]
+
+
+@pytest.mark.parametrize("response", [httpx.Response(403), httpx.Response(429),
+                                     httpx.Response(503, headers={"content-type": "text/html"}),
+                                     httpx.Response(503, content=b" <!DOCTYPE html><html>"),
+                                     httpx.Response(200, content=b"<html>")])
+def test_timetable_block_returns_live_status_without_retry(monkeypatch, response):
+    fake = install(monkeypatch, live_map(train()), **{delays.TIMETABLE_URL: lambda r: response})
+    result = CliRunner().invoke(cli.app, ["status", "03100"])
+    row = json.loads(result.stdout)
+    assert result.exit_code == 0 and row["delay_minutes"] == 12 and row["retries"] == []
+    assert row["schedule_match"] == "unavailable" and str(response.status_code) in row["notice"]
+    assert [str(r.url) for r in fake.requests] == [config.LIVE_MAP_URL, delays.TIMETABLE_URL]
