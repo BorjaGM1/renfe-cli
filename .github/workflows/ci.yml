@@ -31,3 +31,19 @@ jobs:
       - run: uv sync --locked
       - run: uv run python --version
       - run: uv run pytest -q
+
+  windows-startup:
+    name: Windows CLI startup
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+        with:
+          python-version: "3.12"
+      - name: Resolve tomorrow in Madrid using the installed CLI
+        env:
+          PYTHONTZPATH: ""  # Exercise the packaged time zone data even if the runner has its own.
+        run: uv run --locked --no-dev renfe open MADRI BARCE --date tomorrow --no-browser
