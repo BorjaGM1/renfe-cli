@@ -3,12 +3,13 @@
 import csv
 import io
 import re
+import threading
 import time
 import zipfile
 import zlib
 from collections import defaultdict
 from collections.abc import Callable, Iterator
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from functools import partial
 from itertools import chain
 
@@ -206,6 +207,77 @@ def _status(board: live.Board, wanted: str, names: dict[str, str], retries: list
         result["notice"] += f" Ticket-number lookup unavailable. {notice}"
     result["retries"] = retries
     return result
+
+
+def ticket_delays(trains: list[dict], board: live.Board, names: dict[str, str], *,
+                  transport: httpx.BaseTransport | None) -> str | None:
+    """Today's search: a leg whose number isn't on the map, while a published partner's is, gets that train's delay
+    when the timetable verifies the leg's number on it, as `renfe status NUMBER` finds it, over the leg's own times.
+    Sets `delay_minutes` and `live_train` on those legs. Loads the timetable at most once, in one try, and waits for
+    all of it at most config.SEARCH_TIMETABLE_BUDGET seconds. Returns why it couldn't check, or None."""
+    parts = [part for train in trains for part in train.get("legs") or [train]
+             if part["delay_minutes"] is None and _partner_on_map(part["service"], board)]
+    if not parts:
+        return None
+    numbers = train_numbers.timetable_numbers({live.key(part["service"]) for part in parts})
+    state: dict = {}
+
+    def load(days: set[date], _numbers: set[str]) -> Trips:  # one load shared by every leg, as in Watch._load
+        if "error" in state:
+            raise RenfeError(state["error"])
+        if "trips" not in state:
+            if board.updated:
+                days = days | train_numbers.service_days(board.updated)
+            days = days | {day + _ONE_DAY for day in days}
+            try:
+                state["trips"] = _timetable(days, numbers, transport, [], single_attempt=True)
+            except RenfeError as err:
+                state["error"] = err.message
+                raise
+        return state["trips"]
+
+    def work() -> dict[int, tuple[int, str]]:
+        found = {}
+        for index, part in enumerate(parts):
+            wanted = live.key(part["service"])
+            row = _status(board, wanted, names, [], train_numbers.timetable_numbers({wanted}), load)
+            if row["on_map"] and _covers(row, wanted, part):
+                delay = live.leg_delay(part, board, row["train"])
+                if delay is not None:
+                    found[index] = delay, row["train"]
+        return found
+
+    done: dict = {}
+
+    def run() -> None:
+        try:
+            done["found"] = work()
+        except Exception as exc:  # handed to the CLI, which leaves these legs without a delay
+            done["error"] = exc
+
+    thread = threading.Thread(target=run, name="renfe-ticket-numbers", daemon=True)
+    thread.start()
+    thread.join(config.SEARCH_TIMETABLE_BUDGET)
+    done = dict(done)  # read once: the thread may still be running
+    if "error" in done:
+        raise done["error"]
+    if "found" not in done:
+        return f"Renfe timetable: no answer within {config.SEARCH_TIMETABLE_BUDGET:g} s"
+    for index, (delay, train) in done["found"].items():
+        parts[index].update(delay_minutes=delay, live_train=train)
+    return state.get("error")
+
+
+def _partner_on_map(service: str, board: live.Board) -> bool:
+    number = live.key(service)
+    return number not in board.trains and bool((train_numbers.timetable_numbers({number}) - {number}) & board.trains.keys())
+
+
+def _covers(row: dict, wanted: str, part: dict) -> bool:
+    """A verified section under the leg's number spans the leg's scheduled times: this run, over this stretch."""
+    dep, arr = datetime.fromisoformat(part["departure"]), datetime.fromisoformat(part["arrival"])
+    return any(live.key(s["train"]) == wanted and datetime.fromisoformat(s["scheduled_departure"]) <= dep
+               and arr <= datetime.fromisoformat(s["scheduled_arrival"]) for s in row["number_segments"])
 
 
 class Watch:

@@ -163,6 +163,23 @@ LIVE_MAP = live_map(map_train("03100", 12, "60000", "04040", "2027-01-29T10:32:0
                     map_train("00500", 5, "04040", "04040", "2027-01-29T09:33:00", origin="04040"))
 
 
+def route(trip, departure="09:00:00", arrival="12:00:00", origin="60000", destination="71801"):
+    # Store stops out of sequence and give arrival and departure different values.
+    return (f"{trip},2,{destination},{arrival},\n"
+            f"{trip},1,{origin},,{departure}")
+
+
+# 00632 runs Zaragoza (04040) 08:00 - Salamanca (30100) 12:00, sold as 37632 from Miranda de Ebro (11200) to
+# Valladolid (10600) and as 37432 from Valladolid to Salamanca: a published group (train_number_groups.txt).
+def ticket_routes():
+    trips = "daily,00632,whole\ndaily,37632,middle\ndaily,37432,last"
+    stops = "\n".join(("whole,1,04040,,08:00:00", "whole,2,11200,08:59:00,09:00:00",
+                       "whole,3,10600,10:00:00,10:02:00", "whole,4,30100,12:00:00,",
+                       route("middle", "09:00:00", "10:00:00", "11200", "10600"),
+                       route("last", "10:02:00", "12:00:00", "10600", "30100")))
+    return trips, stops
+
+
 def timetable(trips="", stops="", calendar=None, exceptions="daily,20270129,1"):
     tables = {
         "trips": ("service_id,trip_short_name,trip_id", trips),

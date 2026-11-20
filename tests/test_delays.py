@@ -245,17 +245,110 @@ def test_a_map_that_hangs_costs_the_search_its_budget_only(monkeypatch):
 def test_a_bug_attaching_delays_leaves_the_search_without_them(fake, monkeypatch):
     frozen_at(monkeypatch, "2027-01-29T09:30")
 
-    def broken(part, board):
+    def broken(part, board, number=None):
         if board is not None:
             raise KeyError("departure")
         return None
 
-    monkeypatch.setattr(live, "_delay", broken)
+    monkeypatch.setattr(live, "leg_delay", broken)
     result = invoke("search", "Madrid", "Barcelona", "--after", "06:00")
     assert result.exit_code == 0, result.output
     out = json.loads(result.stdout)
     assert out["count"] == 4 and out["delays_included"] is False and no_delays(out)
     assert "Delays are unknown (live map: unexpected error (KeyError))" in out["notice"]
+
+
+# --- ticket numbers in today's search ----------------------------------------------------------------------------
+
+
+def ticket_search(monkeypatch, departure="09:02:00Z", arrival="11:00:00Z", **overrides):
+    """Today at 10:30: a search Valladolid - Salamanca lists 37432 (fakes.ticket_routes), and the map shows the train
+    as 00632, 12 minutes late."""
+    from fakes import path, ticket_routes
+    from renfe import stations
+
+    both = [{"_u_i_c_station_code": code, "name": name, "province": name, "agglomeration_type": "commercial",
+             "main_station": True} for code, name in (("10600", "Valladolid-Campo Grande"), ("30100", "Salamanca"))]
+    every = stations.bundled() + stations.parse(both)
+    monkeypatch.setattr(stations, "bundled", lambda: every)
+    frozen_at(monkeypatch, "2027-01-29T10:30")
+    board = live_map(map_train("00632", 12, "10600", "30100", "2027-01-29T10:52:00", origin="04040",
+                               destination="30100"), updated="2027-01-29T10:30:00")
+    listed = {"total_count": 1, "travel_options": [{"travel_duration": 118, "travel_path": [path(
+        "37432", f"2027-01-29T{departure}", f"2027-01-29T{arrival}", origin="10600", destination="30100")]}]}
+    handlers = {config.SEARCH_TRAVEL_PATH: lambda r: httpx.Response(200, json=listed),
+                TIMETABLE_URL: lambda r: httpx.Response(200, content=timetable(*ticket_routes())), **overrides}
+    return use(monkeypatch, FakeRenfe(live=board, **handlers))
+
+
+def timetable_requests(fake: FakeRenfe) -> int:
+    return sum(str(r.url) == TIMETABLE_URL for r in fake.requests)
+
+
+def test_a_ticket_number_gets_its_live_trains_delay_as_status_finds_it(monkeypatch):
+    fake = ticket_search(monkeypatch)
+    out = json.loads(invoke("search", "10600", "30100", "--after", "06:00", "--no-fares").stdout)
+    (train,) = out["trains"]
+    assert (train["service"], train["delay_minutes"], train["live_train"]) == ("37432", 12, "00632")
+    assert out["notice"] is None and out["delays_included"] is True and timetable_requests(fake) == 1
+    status = json.loads(invoke("status", "37432").stdout)  # the same live train, the same delay
+    assert (status["train"], status["delay_minutes"], status["requested_train"]) == ("00632", 12, "37432")
+
+
+@pytest.mark.parametrize("departure,arrival", [
+    ("09:01:00Z", "11:00:00Z"),  # leaves a minute before the verified section under 37432 starts (10:02 Madrid)
+    ("09:02:00Z", "11:01:00Z"),  # arrives a minute after it ends: not that run, or not that stretch
+])
+def test_a_ticket_number_needs_a_verified_section_over_the_legs_times(monkeypatch, departure, arrival):
+    fake = ticket_search(monkeypatch, departure, arrival)
+    out = json.loads(invoke("search", "10600", "30100", "--after", "06:00", "--no-fares").stdout)
+    assert out["trains"][0]["delay_minutes"] is None and out["trains"][0]["live_train"] is None
+    assert out["notice"] is None and timetable_requests(fake) == 1
+
+
+@pytest.mark.parametrize("response,why", [
+    (httpx.Response(403), "Renfe timetable: blocked (HTTP 403)"),
+    (httpx.Response(503), "Renfe timetable: HTTP 503"),  # one try: a search doesn't wait out retries
+])
+def test_a_timetable_failure_leaves_ticket_numbers_without_delay_and_says_so(monkeypatch, response, why):
+    fake = ticket_search(monkeypatch, **{TIMETABLE_URL: lambda r: response})
+    result = invoke("search", "10600", "30100", "--after", "06:00", "--no-fares")
+    assert result.exit_code == 0, result.output
+    out = json.loads(result.stdout)
+    assert out["trains"][0]["delay_minutes"] is None and out["delays_included"] is True
+    assert out["notice"] == f"Delays of trains sold under another number are unknown ({why})."
+    assert timetable_requests(fake) == 1 and out["retries"] == []
+
+
+def test_a_search_waits_for_the_timetable_only_within_its_budget(monkeypatch):
+    import threading
+
+    release = threading.Event()
+
+    def hangs(request):
+        release.wait(5)
+        return httpx.Response(200, content=b"")
+
+    monkeypatch.setattr(config, "SEARCH_TIMETABLE_BUDGET", 0.2)
+    ticket_search(monkeypatch, **{TIMETABLE_URL: hangs})
+    try:
+        out = json.loads(invoke("search", "10600", "30100", "--after", "06:00", "--no-fares").stdout)
+    finally:
+        release.set()
+    assert out["trains"][0]["delay_minutes"] is None
+    assert out["notice"] == ("Delays of trains sold under another number are unknown "
+                             "(Renfe timetable: no answer within 0.2 s).")
+
+
+def test_live_train_says_where_each_delay_came_from_and_needs_no_timetable(fake, monkeypatch):
+    frozen_at(monkeypatch, "2027-01-29T09:30")
+    out = json.loads(invoke("search", "Madrid", "Barcelona", "--after", "06:00").stdout)
+    sources = {t["service"]: (t["live_train"], [leg["live_train"] for leg in t.get("legs", [])]) for t in out["trains"]}
+    assert sources == {"03000": (None, []), "00600+00500": ("00500", [None, "00500"]), "03100": ("03100", []),
+                       "03200": (None, [])}
+    assert timetable_requests(fake) == 0  # no train sold under a partner of a number on the map
+    other_day = json.loads(invoke("search", "Madrid", "Barcelona", "-d", "2027-01-30").stdout)
+    assert all(part["live_train"] is None for t in other_day["trains"] for part in [t] + t.get("legs", []))
 
 
 def test_a_search_with_an_unknown_station_never_asks_the_map(fake, monkeypatch):

@@ -57,6 +57,9 @@ EXCLUDED_PRODUCT_TYPES = ("DG", "BK")  # sent by the web app on every search; me
 LIVE_MAP_URL = "https://tiempo-real.largorecorrido.renfe.com/renfe-visor/flotaLD.json"
 LIVE_TIMEOUT = 10.0  # how long `status` and `watch` wait for the map
 LIVE_SEARCH_BUDGET = 2.5  # seconds from its start a search for today waits for the map, which it fetches alongside
+# Seconds a search for today then waits for Renfe's timetable (cached for a day), only when a train on the list runs
+# on the map under a published partner number (delays.ticket_delays).
+SEARCH_TIMETABLE_BUDGET = 3.0
 WATCH_INTERVAL = 120.0  # seconds between `watch`'s checks (Renfe caches the map's answer for 30 s)
 WATCH_LIMIT = 12 * 3600.0  # `watch` ends on its own after this: the map doesn't show a trip's end
 WATCH_MAX_UNREADABLE = 3  # answers in a row that aren't the map before `watch` stops (exit 7): it moved or changed

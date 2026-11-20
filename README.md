@@ -19,7 +19,7 @@ scripts and AI agents can use it as easily as people. No account, no API key, an
 - **Live delays** from Renfe's public train map: one train (`status`), a JSON line whenever it changes
   (`watch`), or every delayed train on the network with its scheduled times (`delays`).
 - **The number on your ticket works.** A train can run under another number for part of its route;
-  `status`, `watch` and `delays` find the live train either way.
+  `search`, `status`, `watch` and `delays` find the live train either way.
 - **About 1,400 stations ship with the CLI**, matched by name (accents and case ignored) or code, with
   spelling suggestions for a typo.
 - **Buy on Renfe's website.** `renfe open` opens the right shop with the route filled in. For trips on
@@ -82,7 +82,8 @@ train is left out here:
         {"name": "Premium", "price": 71.77, "currency": "EUR"}
       ],
       "intermediate_stops": 1,
-      "delay_minutes": null
+      "delay_minutes": null,
+      "live_train": null
     }
   ],
   "shop": {
@@ -129,7 +130,9 @@ the exit codes in [Output and errors](#output-and-errors).
 - duration and number of changes;
 - fares for one adult, cheapest first;
 - `delay_minutes`: for today, the train's live delay, else `null`. A train with a change also has one on
-  each leg, and the train's is the first of those the map has.
+  each leg, and the train's is the first of those the map has. Beside it, `live_train` is the number on the
+  live map that delay came from (`null` with no delay): the train's own, or a published partner's when the
+  number you'd buy isn't on the map (see [Delays](#delays)).
 
 It also returns `retries`, empty when nothing was retried: one entry per request that failed once and was
 tried again, with `request` (which one), `tries`, `errors` (what failed on each try, such as
@@ -359,7 +362,9 @@ and the live number in `train`, including for early and on-time trains. When sev
   map doesn't connect or send data for 10 s at a time (a timeout isn't retried).
 
 **In `search`, for today only.** The search asks the map alongside its own requests and waits for it at most
-2.5 s from its start, so a map that hangs costs at most that. It retries the map only when the pause and
+2.5 s from its start, so a map that hangs costs at most that. Only when a train on the list isn't on the map
+under its number but a published partner number is, it then waits at most 3 s more for Renfe's timetable
+(below). It retries the map only when the pause and
 another try can end within those 2.5 s; a retry still running when the search stops waiting is listed in
 `retries` as not recovered. Each train on the map gets its
 `delay_minutes`, the last one recorded, as in `status`; one that isn't gets `null`, and so do they all on
@@ -369,6 +374,18 @@ the map: one whose expected arrival at its next station is more than 45 minutes 
 4 of 95, one of them still at its first station 7.5 hours later with a delay of 0). Nor from yesterday's
 run: the map's time for the train must be less than 12 hours before the leg searched leaves or after it
 arrives. `renfe open` never asks the map.
+
+A train sold under one number can run on the map under another, as `renfe status` explains for ticket numbers.
+Then the search checks Renfe's timetable the way `status` does, loading it at most once (it is cached for a day)
+and in one try. The leg gets the live train's delay, with that number in `live_train`, only when a verified
+section under the leg's number spans the leg's scheduled times, and the same checks as above pass. So a
+delay the search attaches is the live train and delay `renfe status NUMBER` gives (`status` also shows an
+entry left over on the map, which the search drops). If the timetable fails or takes longer than 3 s, those
+legs keep `null` and the notice says "Delays of trains sold under another number are unknown", with the
+reason. With no cached timetable on a slow connection, a search that stops waiting leaves the cache empty, so
+the next one waits again; `renfe delays` or `renfe status` fills it. On 18–20 Nov 2026, on the two routes the
+soak test searched (Madrid–Barcelona, Zaragoza–Madrid), a sold number was off the map while a published
+partner was on it once in 347 searches; routes with more partner numbers see it more often.
 
 Today's list hides trains past their scheduled departure, even a late one that hasn't reached your station
 yet:
