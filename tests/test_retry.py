@@ -169,6 +169,37 @@ def test_the_legacy_shop_falls_back_as_before_after_three_tries(monkeypatch, ret
                                "errors": ["legacy shop results page: server error (502)"] * 3, "recovered": False}]
 
 
+def test_a_legacy_read_timeout_starts_over_once(monkeypatch, retry_pauses):
+    """As on 19 Nov at 01:19, when one train list hung for the full timeout; now LEGACY_TIMEOUT, then a fresh try."""
+    fake = FakeRenfe()
+    fake.overrides["getTrainsList"] = flaky(fake, httpx.ReadTimeout("slow"))
+    out = legacy_search(monkeypatch, fake)
+    assert out["notice"] is None and out["fares_included"] is True and len(fake.legacy_requests()) == 4 + 4
+    assert out["retries"] == [{"request": "legacy shop search (all four requests, started over)", "tries": 2,
+                               "errors": ["legacy shop train list: no answer in time"], "recovered": True}]
+    assert retry_pauses == [1.0]
+    assert {r.extensions["timeout"]["read"] for r in fake.legacy_requests()} == {config.LEGACY_TIMEOUT} == {12.0}
+
+
+def test_a_second_legacy_read_timeout_falls_back(monkeypatch, retry_pauses):
+    """A read timeout after a 500 still gets its one more try; two read timeouts end the search, whatever's left."""
+    fake = FakeRenfe()
+    fake.overrides["getTrainsList"] = flaky(fake, httpx.ReadTimeout("slow"), httpx.ReadTimeout("slow"))
+    out = legacy_search(monkeypatch, fake)
+    assert "failed (legacy shop train list: Renfe did not answer in time)" in out["notice"]
+    assert out["retries"] == [{"request": "legacy shop search (all four requests, started over)", "tries": 2,
+                               "errors": ["legacy shop train list: no answer in time",
+                                          "legacy shop train list: Renfe did not answer in time"],
+                               "recovered": False}]
+    assert retry_pauses == [1.0] and len(fake.legacy_requests()) == 4 + 4
+    fake = FakeRenfe()
+    page = httpx.Response(500, headers={"content-type": "text/html"}, text="<html>Error 500</html>")
+    fake.overrides["buscarTrenEnlaces.do"] = flaky(fake, page)
+    fake.overrides["getTrainsList"] = flaky(fake, httpx.ReadTimeout("slow"))
+    out = legacy_search(monkeypatch, fake)
+    assert out["notice"] is None and out["retries"][0]["tries"] == 3
+
+
 def test_a_legacy_block_falls_back_at_once(monkeypatch, retry_pauses):
     fake = use(monkeypatch, FakeRenfe(**{"buscarTrenEnlaces.do": lambda r: httpx.Response(429)}))
     out = legacy_search(monkeypatch, fake)

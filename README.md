@@ -174,7 +174,11 @@ sale at the moment", not running, or only wheelchair places left) has `available
 
 A one-off failure at any of the legacy shop's four requests (a 500 or 502 without `Retry-After`, whatever
 its body, or a dropped connection) starts its search over from the first request, with a new guest session
-and fresh cookies, up to 3 tries in all. A 503 or 504 there isn't retried: it may be an edge deny or a
+and fresh cookies, up to 3 tries in all. A request there that gets no answer for 12 s starts the search over
+once more, not twice (on 19 Nov one train list hung for the CLI's general 25 s while the shop answered other
+searches in about a second; over two days the slowest search that got its list took 11.9 s for the whole
+command).
+A 503 or 504 there isn't retried: it may be an edge deny or a
 waiting room. If it still fails (or a block or rate limit, a waiting room or challenge page, or an answer
 the CLI can't read stops it), or it lists no trains, you get the new system's partial list instead, without
 fares, and a `notice` saying what failed; the exit code stays 0. On 19 Nov 2026 the legacy shop sent no train
@@ -214,7 +218,7 @@ once. A 403 is reported as a block, and the saved session is dropped so the next
 401 resend counts as one of those 3 tries and goes at once; a retry after it waits 1 s, as a first retry
 does, and a 403 to a saved session drops the file even on the third try. An HTML page is bot protection
 whatever its status (a 503 page too), and isn't retried. Neither is a timeout: one already costs the whole
-25 s timeout. With no network at all, a search takes a few seconds longer to fail than before (3 s of
+25 s timeout (the legacy shop's is 12 s, and tried once more; see above). With no network at all, a search takes a few seconds longer to fail than before (3 s of
 pauses; 6 s before 25 Jan 2027, when the legacy shop is tried first), since a DNS or TLS failure counts as a
 refused connection.
 Before 25 Jan 2027 a search is the legacy shop's four requests instead, about 0.8–1.8 s with fares

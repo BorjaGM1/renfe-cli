@@ -6,7 +6,8 @@ a connection that drops or is refused before the answer is in (httpx's ConnectEr
 CloseError, RemoteProtocolError). Up to 2 retries, 3 tries in all, 1 s and then 2 s apart; the client's one resend
 for a stale saved session is one of those 3 tries. Never retried: a block or rate limit (403, 429), a bot,
 challenge or waiting-room page (HTML where JSON was expected, whatever the status), any other 4xx, an answer that
-doesn't read, and a timeout, which has already cost the whole timeout.
+doesn't read, and a timeout, which has already cost the whole timeout (except the legacy shop's shorter read timeout,
+which legacy.py tries once more).
 
 Each request that had to be retried is logged, for the `retries` list of the command's output.
 """

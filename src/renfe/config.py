@@ -23,6 +23,11 @@ TIMEZONE = "Europe/Madrid"
 # web app fires its calls back to back. A block or rate limit still stops the CLI (exit 5).
 REQUEST_SPACING = 0.0
 REQUEST_TIMEOUT = 25.0
+# The legacy shop's timeout per request, its read timeout tried once more (legacy.py). Over 18-20 Nov 2026 the slowest
+# legacy search that got its list took 11.9 s for the whole command (its four requests plus the CLI's start-up), so
+# none that answered would have been cut; one train-list request hung for the full 25 s (19 Nov, 01:19) while the shop
+# answered other searches in about a second. Two timeouts and the pause between them cost about what that one did.
+LEGACY_TIMEOUT = 12.0
 
 PUBLIC_TOKEN_PATH = "/user/external-users-login/v1/tokens/public"
 STATIONS_PATH = "/catalog/masterdata/v1/stations"
