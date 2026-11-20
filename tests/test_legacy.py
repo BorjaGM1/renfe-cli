@@ -159,7 +159,9 @@ FAILURES = {
     "a challenge instead of the results page": ("buscarTrenEnlaces.do", lambda r: httpx.Response(
         200, headers={"content-type": "text/html"}, text="<html>challenge</html>"), 2, "not the results page"),
     "server error": ("buscarTrenEnlaces.do", lambda r: httpx.Response(503), 2, "server error (503)"),  # not retried
-    "timeout": ("generateId", lambda r: (_ for _ in ()).throw(httpx.ReadTimeout("slow")), 3, "did not answer"),
+    "timeout": ("generateId", lambda r: (_ for _ in ()).throw(httpx.ReadTimeout("slow")), 3 + 3, "did not answer"),
+    "connect timeout": ("generateId", lambda r: (_ for _ in ()).throw(httpx.ConnectTimeout("slow")), 3,
+                        "did not answer"),
     "no session id": ("generateId", lambda r: dwr_response('r.handleCallback("0","0",null);'), 3, "no session id"),
     "an HTML page for DWR": ("getTrainsList", lambda r: httpx.Response(
         200, headers={"content-type": "text/html"}, text="<html></html>"), 4, "HTML page"),
@@ -171,6 +173,9 @@ FAILURES = {
         'r.handleCallback("1","0",{listadoTrenes:[{hayError:true,cdgoError:"E1"}]});'), 4, "reported an error"),
     "no trains": ("getTrainsList", lambda r: dwr_response(legacy_answer("2026-11-20", [])), 4,
                   "it listed no trains"),
+    "no train list, as overnight on 19 Nov": ("getTrainsList", lambda r: dwr_response(
+        'r.handleCallback("1","0",{actEtiqOferta:null,activoCuposAbonosRec:"SI",listadoTrenes:null});'), 4,
+        "Renfe's shop isn't listing trains right now"),
 }
 
 
@@ -179,7 +184,7 @@ def test_a_failure_falls_back_to_the_new_systems_list_with_a_notice(name):
     url_part, answer, sent, reason = FAILURES[name]
     fake = FakeRenfe(**{url_part: answer})
     out = run(fake)
-    assert len(fake.legacy_requests()) == sent  # it stopped at the failure (only a 500 or 502 is tried again)
+    assert len(fake.legacy_requests()) == sent  # it stopped at the failure (a 500, 502 or read timeout started over)
     assert reason in out["notice"] and "legacy shop" in out["notice"] and "may be missing trains" in out["notice"]
     assert out["count"] == 4 and out["fares_included"] is False and all(t["fares"] is None for t in out["trains"])
     assert "Texto libre" not in out["notice"]

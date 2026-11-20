@@ -203,15 +203,16 @@ def annotate(trains: list[dict], board: Board | None) -> None:
     of them the map has: the leg the trip is on, or the next one to run."""
     for train in trains:
         legs = train.get("legs") or [train]
-        found = [_delay(leg, board) for leg in legs]
+        found = [leg_delay(leg, board) for leg in legs]
         if "legs" in train:
             for leg, delay in zip(legs, found):
                 leg["delay_minutes"] = delay
         train["delay_minutes"] = next((delay for delay in found if delay is not None), None)
 
 
-def _delay(part: dict, board: Board | None) -> int | None:
-    entry = board.trains.get(key(part["service"])) if board else None
+def leg_delay(part: dict, board: Board | None, number: str | None = None) -> int | None:
+    """The delay of the map entry for `number` (default: the leg's own), if it is this leg's run and not left over."""
+    entry = board.trains.get(key(number or part["service"])) if board else None
     seen = entry and (entry["reported_at"] or board.updated)
     if not seen or entry["delay"] is None:
         return None

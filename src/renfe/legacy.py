@@ -13,10 +13,11 @@ The same DWR interface also selects a train and validates fares, which start the
 Cookies live in memory for the one search. A one-off failure at any step (a 500 or 502 without Retry-After, or a
 connection that drops or is refused) starts the search over from step 1, with a new guest session and fresh cookies,
 up to 2 more times (retry.py; seen on 18 Nov 2026: the results page answered 500 once). Those count whatever their
-body: the shop's own pages are HTML. Nothing else is retried: a 503 or 504 (here it may be an edge deny or a waiting
-room), a 403/429, a redirect anywhere but the results page (a waiting room), an HTML page where DWR was expected, a
-timeout, or an answer that doesn't parse raises a RenfeError at once, and search() falls back to the new system's
-partial list.
+body: the shop's own pages are HTML. A request with no answer for config.LEGACY_TIMEOUT seconds (a read timeout; seen
+on 19 Nov: one train list hung) starts it over once, not twice: each costs that timeout. Nothing else is retried: a
+503 or 504 (here it may be an edge deny or a waiting room), a 403/429, a redirect anywhere but the results page (a
+waiting room), an HTML page where DWR was expected, a connect timeout, a second read timeout, or an answer that
+doesn't parse raises a RenfeError at once, and search() falls back to the new system's partial list.
 """
 
 import html
@@ -50,6 +51,7 @@ _TRAINS_CALL = 'r.handleCallback("1","0",'
 _PRICE = re.compile(r"([0-9]{1,5})(?:,([0-9]{1,2}))?")  # "31,15", "59,6", "149,0"
 _HOUR = re.compile(r"([01][0-9]|2[0-3]):([0-5][0-9])(?::[0-5][0-9])?")
 _ON_SALE = ("", "8")  # razonNoDisponible values the results page sells (see _on_sale)
+_NO_ANSWER = "no answer in time"  # a read timeout, worth one more try (trains)
 
 
 # --- the search ------------------------------------------------------------------------------------
@@ -59,8 +61,19 @@ def trains(origin: Station, destination: Station, day: date, names: dict[str, st
            transport: httpx.BaseTransport | None = None, retries: list[dict] | None = None) -> list[dict]:
     """Every train the legacy shop sells from `origin` to `destination` on `day`, with fares, in the shape
     search() builds (legs keep `_dep_utc` for sorting). A search that had to start over is logged in `retries`."""
-    return retry.call("legacy shop search (all four requests, started over)",
-                      lambda: _search(origin, destination, day, names, transport), retries)
+    timed_out = []
+
+    def attempt() -> list[dict]:
+        try:
+            return _search(origin, destination, day, names, transport)
+        except UpstreamError as err:
+            if err.transient and err.transient.endswith(_NO_ANSWER):
+                if timed_out:  # one more try after a read timeout, not two: each costs config.LEGACY_TIMEOUT
+                    err.transient = None
+                timed_out.append(err)
+            raise
+
+    return retry.call("legacy shop search (all four requests, started over)", attempt, retries)
 
 
 def _search(origin: Station, destination: Station, day: date, names: dict[str, str],
@@ -69,7 +82,7 @@ def _search(origin: Station, destination: Station, day: date, names: dict[str, s
     with httpx.Client(
         transport=transport,
         http2=transport is None,
-        timeout=config.REQUEST_TIMEOUT,
+        timeout=config.LEGACY_TIMEOUT,
         follow_redirects=False,
         headers={"user-agent": config.USER_AGENT, "accept-language": config.ACCEPT_LANGUAGE},
     ) as http:
@@ -82,7 +95,9 @@ def _search(origin: Station, destination: Station, day: date, names: dict[str, s
 def _send(http: httpx.Client, method: str, url: str, label: str, **kw: Any) -> httpx.Response:
     try:
         response = http.request(method, url, **kw)
-    except httpx.TimeoutException:  # never retried: it already cost the whole timeout
+    except httpx.ReadTimeout:  # tried once more (trains)
+        raise UpstreamError(f"{label}: Renfe did not answer in time", transient=_step(label, _NO_ANSWER)) from None
+    except httpx.TimeoutException:  # a connect, write or pool timeout: not seen, and not retried
         raise UpstreamError(f"{label}: Renfe did not answer in time") from None
     except httpx.RequestError as exc:
         raise UpstreamError(f"{label}: request failed ({type(exc).__name__})",
@@ -227,6 +242,11 @@ def _parse_trains(doc: Any, origin: Station, destination: Station, names: dict[s
 
 
 def _parse_trains_unchecked(doc: Any, names: dict[str, str]) -> list[dict]:
+    if isinstance(doc, dict) and "listadoTrenes" in doc and doc["listadoTrenes"] is None:
+        # 19 Nov 2026 from 03:49, every search got {"actEtiqOferta": null, "activoCuposAbonosRec": "SI",
+        # "listadoTrenes": null}, back by 04:04 for Madrid-Barcelona and by about 04:35 for Zaragoza-Madrid (not
+        # seen on the 20th). An outage, not a changed answer; another try seconds later wouldn't help.
+        raise UpstreamError("legacy shop train list: Renfe's shop isn't listing trains right now")
     (outbound,) = doc["listadoTrenes"]  # one list per direction; we ask for one way only
     if outbound.get("hayError") is True:
         raise UpstreamError("legacy shop train list: Renfe's shop reported an error for this search")

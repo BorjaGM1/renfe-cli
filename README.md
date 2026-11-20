@@ -19,7 +19,7 @@ scripts and AI agents can use it as easily as people. No account, no API key, an
 - **Live delays** from Renfe's public train map: one train (`status`), a JSON line whenever it changes
   (`watch`), or every delayed train on the network with its scheduled times (`delays`).
 - **The number on your ticket works.** A train can run under another number for part of its route;
-  `status`, `watch` and `delays` find the live train either way.
+  `search`, `status`, `watch` and `delays` find the live train either way.
 - **About 1,400 stations ship with the CLI**, matched by name (accents and case ignored) or code, with
   spelling suggestions for a typo.
 - **Buy on Renfe's website.** `renfe open` opens the right shop with the route filled in. For trips on
@@ -82,7 +82,8 @@ train is left out here:
         {"name": "Premium", "price": 71.77, "currency": "EUR"}
       ],
       "intermediate_stops": 1,
-      "delay_minutes": null
+      "delay_minutes": null,
+      "live_train": null
     }
   ],
   "shop": {
@@ -129,7 +130,9 @@ the exit codes in [Output and errors](#output-and-errors).
 - duration and number of changes;
 - fares for one adult, cheapest first;
 - `delay_minutes`: for today, the train's live delay, else `null`. A train with a change also has one on
-  each leg, and the train's is the first of those the map has.
+  each leg, and the train's is the first of those the map has. Beside it, `live_train` is the number on the
+  live map that delay came from (`null` with no delay): the train's own, or a published partner's when the
+  number you'd buy isn't on the map (see [Delays](#delays)).
 
 It also returns `retries`, empty when nothing was retried: one entry per request that failed once and was
 tried again, with `request` (which one), `tries`, `errors` (what failed on each try, such as
@@ -174,12 +177,20 @@ sale at the moment", not running, or only wheelchair places left) has `available
 
 A one-off failure at any of the legacy shop's four requests (a 500 or 502 without `Retry-After`, whatever
 its body, or a dropped connection) starts its search over from the first request, with a new guest session
-and fresh cookies, up to 3 tries in all. A 503 or 504 there isn't retried: it may be an edge deny or a
+and fresh cookies, up to 3 tries in all. A request there that gets no answer for 12 s starts the search over
+once more, not twice (on 19 Nov one train list hung for the CLI's general 25 s while the shop answered other
+searches in about a second; over two days the slowest search that got its list took 11.9 s for the whole
+command).
+A 503 or 504 there isn't retried: it may be an edge deny or a
 waiting room. If it still fails (or a block or rate limit, a waiting room or challenge page, or an answer
 the CLI can't read stops it), or it lists no trains, you get the new system's partial list instead, without
-fares, and a `notice` saying what failed; the exit code stays 0. The one exception is today after the last
-departure: the legacy shop lists only trains that haven't left, so when it lists none and the new system
-has no train leaving from now on either, nothing failed, and the only notice is "No more trains today".
+fares, and a `notice` saying what failed; the exit code stays 0. On 19 Nov 2026 the legacy shop sent no train
+list at all for any search from 03:49 until 04:04 (Madrid–Barcelona) and about 04:35 (Zaragoza–Madrid); the
+notice then says it "isn't listing trains right now". The one exception is today at the end of the day:
+the legacy shop lists only trains leaving in more than about 5 minutes (see [Delays](#delays)), so when it
+lists none and the new system has nothing leaving later either, nothing failed. With no train left, the only
+notice is "No more trains today". With the last trains leaving within those minutes, the list shows them from
+the new system, without fares, and the notice says the legacy shop no longer lists them.
 On any other date (or judged by `--after`), an empty list from the legacy shop keeps the fallback notice:
 before 25 Jan the new system lists only part of the timetable, so its being empty too proves little. The
 CLI never tries to get past a waiting room or a captcha. `shop.url` and `renfe open` take you to the full
@@ -212,7 +223,7 @@ once. A 403 is reported as a block, and the saved session is dropped so the next
 401 resend counts as one of those 3 tries and goes at once; a retry after it waits 1 s, as a first retry
 does, and a 403 to a saved session drops the file even on the third try. An HTML page is bot protection
 whatever its status (a 503 page too), and isn't retried. Neither is a timeout: one already costs the whole
-25 s timeout. With no network at all, a search takes a few seconds longer to fail than before (3 s of
+25 s timeout (the legacy shop's is 12 s, and tried once more; see above). With no network at all, a search takes a few seconds longer to fail than before (3 s of
 pauses; 6 s before 25 Jan 2027, when the legacy shop is tried first), since a DNS or TLS failure counts as a
 refused connection.
 Before 25 Jan 2027 a search is the legacy shop's four requests instead, about 0.8–1.8 s with fares
@@ -351,7 +362,9 @@ and the live number in `train`, including for early and on-time trains. When sev
   map doesn't connect or send data for 10 s at a time (a timeout isn't retried).
 
 **In `search`, for today only.** The search asks the map alongside its own requests and waits for it at most
-2.5 s from its start, so a map that hangs costs at most that. It retries the map only when the pause and
+2.5 s from its start, so a map that hangs costs at most that. Only when a train on the list isn't on the map
+under its number but a published partner number is, it then waits at most 3 s more for Renfe's timetable
+(below). It retries the map only when the pause and
 another try can end within those 2.5 s; a retry still running when the search stops waiting is listed in
 `retries` as not recovered. Each train on the map gets its
 `delay_minutes`, the last one recorded, as in `status`; one that isn't gets `null`, and so do they all on
@@ -362,10 +375,24 @@ the map: one whose expected arrival at its next station is more than 45 minutes 
 run: the map's time for the train must be less than 12 hours before the leg searched leaves or after it
 arrives. `renfe open` never asks the map.
 
+A train sold under one number can run on the map under another, as `renfe status` explains for ticket numbers.
+Then the search checks Renfe's timetable the way `status` does, loading it at most once (it is cached for a day)
+and in one try. The leg gets the live train's delay, with that number in `live_train`, only when a verified
+section under the leg's number spans the leg's scheduled times, and the same checks as above pass. So a
+delay the search attaches is the live train and delay `renfe status NUMBER` gives (`status` also shows an
+entry left over on the map, which the search drops). If the timetable fails or takes longer than 3 s, those
+legs keep `null` and the notice says "Delays of trains sold under another number are unknown", with the
+reason. With no cached timetable on a slow connection, a search that stops waiting leaves the cache empty, so
+the next one waits again; `renfe delays` or `renfe status` fills it. On 18–20 Nov 2026, on the two routes the
+soak test searched (Madrid–Barcelona, Zaragoza–Madrid), a sold number was off the map while a published
+partner was on it once in 347 searches; routes with more partner numbers see it more often.
+
 Today's list hides trains past their scheduled departure, even a late one that hasn't reached your station
 yet:
-- **Before 25 Jan 2027** the list comes from the legacy shop, which left out a train that had already left the
-  station searched from, even with `--after`. On 18 Nov 2026 at about 06:30, `search Barcelona Madrid
+- **Before 25 Jan 2027** the list comes from the legacy shop, which stops listing a train about 5 minutes
+  before it leaves the station searched from, even with `--after`. Checked every 15 minutes on two routes on
+  18–20 Nov 2026: of 74 trains due within 15 minutes, the 6 due in under 5 minutes were missing and the 68
+  due in 5.8 minutes or more were there. On 18 Nov 2026 at about 06:30, `search Barcelona Madrid
   --after 05:00` started at 06:35, without 03052, which had left Barcelona-Sants (its first station) at
   05:40 and was on the map 7 minutes late. From a station further along its route, without `--after`, it
   was there: `search Zaragoza Madrid` listed it leaving at 07:09, with `delay_minutes: 7`.

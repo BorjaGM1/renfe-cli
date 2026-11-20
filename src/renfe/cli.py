@@ -169,6 +169,20 @@ def _names(*picked: stations_mod.Station) -> dict[str, str]:
     return {s.code: s.name for s in stations_mod.bundled()} | {s.code: s.name for s in picked}
 
 
+def _live_trains(trains: list[dict]) -> None:
+    """`live_train` beside each `delay_minutes`: the number on the map it came from (a published partner's when the
+    ticket number isn't there), or None with no delay. A train's comes from the leg its delay comes from."""
+    for train in trains:
+        parts = train.get("legs") or [train]
+        for part in parts:
+            known = part["delay_minutes"] is not None
+            part["live_train"] = (part.get("live_train") or part["service"].zfill(5)) if known else None
+        if "legs" in train:
+            first = next((part for part in parts if part["delay_minutes"] is not None), None)
+            train["delay_minutes"] = first["delay_minutes"] if first else None
+            train["live_train"] = first["live_train"] if first else None
+
+
 def _add_notice(out: dict, text: str) -> None:
     out["notice"] = f"{out['notice']} {text}" if out["notice"] else text
 
@@ -195,8 +209,9 @@ def search_cmd(
         today = day == now.date()
         with _client() as client:
             src, dst = _stations(client, origin, destination)
+            names = _names(src, dst)
             delays = live.in_background(client.transport) if today else None  # runs alongside the search
-            out = search_mod.search(client, src, dst, day, names=_names(src, dst), after=after_time, fares=fares,
+            out = search_mod.search(client, src, dst, day, names=names, after=after_time, fares=fares,
                                     arrive_by=arrival_time, limit=limit, now=now, from_now=today and after_time is None)
         board, why, map_retries = delays() if delays else (None, None, [])
         try:
@@ -204,9 +219,18 @@ def search_cmd(
         except Exception as exc:  # the map never fails a search: a bug here leaves it without delays
             live.annotate(out["trains"], None)
             board, why = None, f"{live.LABEL}: unexpected error ({type(exc).__name__})"
+        unchecked = None
+        if board is not None:
+            try:
+                unchecked = delays_mod.ticket_delays(out["trains"], board, names, transport=client.transport)
+            except Exception as exc:  # nor does a ticket-number check: those legs keep no delay
+                unchecked = f"unexpected error ({type(exc).__name__})"
+        _live_trains(out["trains"])
         out["delays_included"] = board is not None
         if why:
             _add_notice(out, f"Delays are unknown ({why}).")
+        if unchecked:
+            _add_notice(out, f"Delays of trains sold under another number are unknown ({unchecked}).")
         out["retries"] = client.retries + map_retries
         return out
 
@@ -370,7 +394,8 @@ def open_cmd(
                 if chosen is None and not found["notice"]:
                     message = f"no train {train} from {src.name} to {dst.name} on {day.isoformat()}; `renfe search` lists them"
                     if day == datetime.now(search_mod.MADRID).date() and day < config.NSV_FIRST_SALE_DATE:
-                        message += ". The legacy shop stops listing a train after it leaves the searched station."
+                        message += (". The legacy shop stops listing a train about 5 minutes before it leaves the "
+                                    "searched station.")
                     raise UsageError(message)
                 if chosen is None:
                     notices.append(f"Train {train} isn't in the list this CLI can see for {day.isoformat()}, "

@@ -346,7 +346,7 @@ def test_open_explains_a_missing_train_on_todays_legacy_list(fake, monkeypatch):
     monkeypatch.setattr(cli, "datetime", LegacyDay)
     result = invoke("open", "Madrid", "Barcelona", "--train", "00500", "--no-browser")
     assert result.exit_code == 2
-    assert "after it leaves the searched station" in json.loads(result.stderr)["error"]["message"]
+    assert "about 5 minutes before it leaves the searched station" in json.loads(result.stderr)["error"]["message"]
     assert not fake.live_requests()
 
 
