@@ -227,6 +227,11 @@ def _parse_trains(doc: Any, origin: Station, destination: Station, names: dict[s
 
 
 def _parse_trains_unchecked(doc: Any, names: dict[str, str]) -> list[dict]:
+    if isinstance(doc, dict) and "listadoTrenes" in doc and doc["listadoTrenes"] is None:
+        # 19 Nov 2026 from 03:49, every search got {"actEtiqOferta": null, "activoCuposAbonosRec": "SI",
+        # "listadoTrenes": null}, back by 04:04 for Madrid-Barcelona and by about 04:35 for Zaragoza-Madrid (not
+        # seen on the 20th). An outage, not a changed answer; another try seconds later wouldn't help.
+        raise UpstreamError("legacy shop train list: Renfe's shop isn't listing trains right now")
     (outbound,) = doc["listadoTrenes"]  # one list per direction; we ask for one way only
     if outbound.get("hayError") is True:
         raise UpstreamError("legacy shop train list: Renfe's shop reported an error for this search")

@@ -177,7 +177,9 @@ its body, or a dropped connection) starts its search over from the first request
 and fresh cookies, up to 3 tries in all. A 503 or 504 there isn't retried: it may be an edge deny or a
 waiting room. If it still fails (or a block or rate limit, a waiting room or challenge page, or an answer
 the CLI can't read stops it), or it lists no trains, you get the new system's partial list instead, without
-fares, and a `notice` saying what failed; the exit code stays 0. The one exception is today after the last
+fares, and a `notice` saying what failed; the exit code stays 0. On 19 Nov 2026 the legacy shop sent no train
+list at all for any search from 03:49 until 04:04 (Madrid–Barcelona) and about 04:35 (Zaragoza–Madrid); the
+notice then says it "isn't listing trains right now". The one exception is today after the last
 departure: the legacy shop lists only trains that haven't left, so when it lists none and the new system
 has no train leaving from now on either, nothing failed, and the only notice is "No more trains today".
 On any other date (or judged by `--after`), an empty list from the legacy shop keeps the fallback notice:

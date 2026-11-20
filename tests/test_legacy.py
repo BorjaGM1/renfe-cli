@@ -171,6 +171,9 @@ FAILURES = {
         'r.handleCallback("1","0",{listadoTrenes:[{hayError:true,cdgoError:"E1"}]});'), 4, "reported an error"),
     "no trains": ("getTrainsList", lambda r: dwr_response(legacy_answer("2026-11-20", [])), 4,
                   "it listed no trains"),
+    "no train list, as overnight on 19 Nov": ("getTrainsList", lambda r: dwr_response(
+        'r.handleCallback("1","0",{actEtiqOferta:null,activoCuposAbonosRec:"SI",listadoTrenes:null});'), 4,
+        "Renfe's shop isn't listing trains right now"),
 }
 
 
