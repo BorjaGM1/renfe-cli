@@ -183,9 +183,11 @@ waiting room. If it still fails (or a block or rate limit, a waiting room or cha
 the CLI can't read stops it), or it lists no trains, you get the new system's partial list instead, without
 fares, and a `notice` saying what failed; the exit code stays 0. On 19 Nov 2026 the legacy shop sent no train
 list at all for any search from 03:49 until 04:04 (Madrid–Barcelona) and about 04:35 (Zaragoza–Madrid); the
-notice then says it "isn't listing trains right now". The one exception is today after the last
-departure: the legacy shop lists only trains that haven't left, so when it lists none and the new system
-has no train leaving from now on either, nothing failed, and the only notice is "No more trains today".
+notice then says it "isn't listing trains right now". The one exception is today at the end of the day:
+the legacy shop lists only trains leaving in more than about 5 minutes (see [Delays](#delays)), so when it
+lists none and the new system has nothing leaving later either, nothing failed. With no train left, the only
+notice is "No more trains today". With the last trains leaving within those minutes, the list shows them from
+the new system, without fares, and the notice says the legacy shop no longer lists them.
 On any other date (or judged by `--after`), an empty list from the legacy shop keeps the fallback notice:
 before 25 Jan the new system lists only part of the timetable, so its being empty too proves little. The
 CLI never tries to get past a waiting room or a captcha. `shop.url` and `renfe open` take you to the full
@@ -370,8 +372,10 @@ arrives. `renfe open` never asks the map.
 
 Today's list hides trains past their scheduled departure, even a late one that hasn't reached your station
 yet:
-- **Before 25 Jan 2027** the list comes from the legacy shop, which left out a train that had already left the
-  station searched from, even with `--after`. On 18 Nov 2026 at about 06:30, `search Barcelona Madrid
+- **Before 25 Jan 2027** the list comes from the legacy shop, which stops listing a train about 5 minutes
+  before it leaves the station searched from, even with `--after`. Checked every 15 minutes on two routes on
+  18–20 Nov 2026: of 74 trains due within 15 minutes, the 6 due in under 5 minutes were missing and the 68
+  due in 5.8 minutes or more were there. On 18 Nov 2026 at about 06:30, `search Barcelona Madrid
   --after 05:00` started at 06:35, without 03052, which had left Barcelona-Sants (its first station) at
   05:40 and was on the map 7 minutes late. From a station further along its route, without `--after`, it
   was there: `search Zaragoza Madrid` listed it leaving at 07:09, with `delay_minutes: 7`.

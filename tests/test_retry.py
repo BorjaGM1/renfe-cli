@@ -309,7 +309,8 @@ def new_system_on(day: str, *departures: str) -> dict:
 
 @pytest.mark.parametrize("clock,after,listed", [
     ("23:30", "06:00", 2),   # `--after` keeps the day's trains: the new system's partial list, said so
-    ("22:04:30", None, 1),  # the 22:04 train is in today's list (the minute is kept), though "now" is 30 s later
+    ("21:57", None, 1),      # the 22:04 train is 7 minutes away: the shop should still list it
+    ("21:30", "21:00", 1),   # likewise with `--after`
 ])
 def test_an_empty_legacy_list_still_falls_back_when_the_new_system_list_is_shown(monkeypatch, clock, after, listed):
     frozen_at(monkeypatch, f"2026-11-15T{clock}")
@@ -319,6 +320,27 @@ def test_an_empty_legacy_list_still_falls_back_when_the_new_system_list_is_shown
     out = json.loads(invoke("search", "Madrid", "Barcelona", *(["--after", after] if after else [])).stdout)
     assert out["count"] == listed and "failed (it listed no trains)" in out["notice"]
     assert "may be missing trains" in out["notice"] and out["fares_included"] is False
+
+
+@pytest.mark.parametrize("clock,after", [
+    ("22:04:30", None),     # as on 19 Nov at 21:49: the last train leaves this minute, the new system still lists it
+    ("21:58:01", None),     # just inside the shop's cut-off (and the minute of margin)
+    ("21:59", "21:00"),     # `--after` changes nothing when what it keeps is leaving now
+])
+def test_the_last_train_leaving_now_isnt_a_legacy_failure(monkeypatch, clock, after):
+    """The legacy shop stops listing a train about 5 minutes before it leaves; the new system lists it until its
+    minute is over. The list shows it, from the new system, and the notice says why, not that the shop failed."""
+    frozen_at(monkeypatch, f"2026-11-15T{clock}")
+    that_day = new_system_on("2026-11-15", "09:00", "22:04")
+    use(monkeypatch, FakeRenfe(legacy_trains=[], **{config.SEARCH_TRAVEL_PATH: lambda r: httpx.Response(
+        200, json=that_day)}))
+    out = json.loads(invoke("search", "Madrid", "Barcelona", *(["--after", after] if after else [])).stdout)
+    assert [t["departure"][11:16] for t in out["trains"]] == ["22:04"]
+    assert out["notice"] == ("Renfe's legacy shop (https://venta.renfe.com/vol/) stops listing a train about 5 minutes "
+                             "before it leaves, so the trains leaving now are from Renfe's new system, without fares.")
+    assert out["fares_included"] is False and out["trains"][0]["fares"] is None
+    no_fares = json.loads(invoke("search", "Madrid", "Barcelona", "--no-fares").stdout)
+    assert no_fares["notice"].endswith("are from Renfe's new system.")
 
 
 @pytest.mark.parametrize("clock,departure", [("08:00", []), ("23:30", ["--after", "06:00"])])

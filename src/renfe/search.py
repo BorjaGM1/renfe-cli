@@ -21,6 +21,10 @@ from .errors import ApiShapeError, BlockedError, RenfeError
 from .stations import Station
 
 MADRID = ZoneInfo(config.TIMEZONE)
+# The legacy shop stops listing a train about 5 minutes before it leaves. Today's searches every 15 minutes on two
+# routes, 18-20 Nov 2026: of 74 trains due within 15 minutes of a search, the 6 due in under 5 minutes were missing
+# and the 68 due in 5.8 minutes or more were listed. The extra minute covers the clocks.
+LEGACY_LISTING_LEAD = timedelta(minutes=6)
 _SHAPE_ERRORS = (KeyError, IndexError, TypeError, AttributeError, ValueError, OverflowError)
 
 
@@ -286,17 +290,21 @@ def search(
         if total is not None and total > len(trains):
             notices.append(f"Renfe reported {total} trains but returned {len(trains)}; some may be missing.")
     minute = now.replace(second=0, microsecond=0) if now is not None else None  # as the CLI's default `after`
-    leaving = minute is not None and any(datetime.fromisoformat(t["departure"]) >= minute for t in trains)
+    leaves = lambda t: datetime.fromisoformat(t["departure"])
+    shop_would_list = now is not None and any(leaves(t) > now + LEGACY_LISTING_LEAD for t in trains)
     if from_now and minute is not None:
         after = minute.time()
     if after:
-        trains = [t for t in trains if datetime.fromisoformat(t["departure"]).time() >= after]
-    if legacy_empty and minute is not None and day == minute.date() and not leaving and not trains:
-        # The shop lists only trains that haven't left. Today, with nothing leaving from now on in the new system's
-        # list either, and nothing in the list shown, the day is over: nothing failed. Not on other days, and not
-        # when `after` keeps trains: before the cut-off the new system lists only part of the timetable, so a list
-        # from it needs the notice, and its being empty proves little.
-        legacy_failure = None
+        trains = [t for t in trains if leaves(t).time() >= after]
+    leaving_now = False
+    if (legacy_empty and minute is not None and day == minute.date() and not shop_would_list
+            and all(leaves(t) >= minute for t in trains)):
+        # The shop lists only trains leaving in more than about 5 minutes. Today, with none of those in the new
+        # system's list either, nothing failed: the day is over (nothing in the list shown), or the last trains are
+        # leaving now (those it shows). Not on other days, and not when `after` keeps other trains: before the
+        # cut-off the new system lists only part of the timetable, so a list from it needs the notice, and its being
+        # empty proves little.
+        legacy_failure, leaving_now = None, bool(trains)
     # Both end-of-day checks describe departures, before the arrival deadline can hide any of them.
     no_more_departures = from_now and not trains
     if arrive_by is not None:
@@ -343,6 +351,11 @@ def search(
                        f"{config.NSV_FIRST_SALE_DATE.isoformat()}, failed ({legacy_failure}), so this list is from "
                        f"Renfe's new system: {'no fares, and ' if fares else ''}it may be missing trains. "
                        "`shop.url` opens the full list on Renfe's website.")
+
+    if leaving_now:
+        notices.append(f"Renfe's legacy shop ({config.LEGACY_SHOP_URL}) stops listing a train about 5 minutes before "
+                       f"it leaves, so the trains leaving now are from Renfe's new system"
+                       f"{', without fares' if fares else ''}.")
 
     if no_more_departures and after is not None:
         notices.append(f"No more trains today after {after:%H:%M}; try --date tomorrow.")

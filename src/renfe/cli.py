@@ -370,7 +370,8 @@ def open_cmd(
                 if chosen is None and not found["notice"]:
                     message = f"no train {train} from {src.name} to {dst.name} on {day.isoformat()}; `renfe search` lists them"
                     if day == datetime.now(search_mod.MADRID).date() and day < config.NSV_FIRST_SALE_DATE:
-                        message += ". The legacy shop stops listing a train after it leaves the searched station."
+                        message += (". The legacy shop stops listing a train about 5 minutes before it leaves the "
+                                    "searched station.")
                     raise UsageError(message)
                 if chosen is None:
                     notices.append(f"Train {train} isn't in the list this CLI can see for {day.isoformat()}, "
