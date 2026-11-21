@@ -42,7 +42,7 @@ from .errors import ApiShapeError, AuthError, BlockedError, RenfeError, Upstream
 
 try:
     import fcntl
-except ImportError:  # pragma: no cover - non-POSIX: pacing falls back to this process only
+except ImportError:  # pragma: no cover - non-POSIX: the pace file is read and written without a lock
     fcntl = None  # type: ignore[assignment]
 
 _RENFE_CODE = re.compile(r"[A-Z][A-Z0-9_]{1,59}")  # Renfe's error codes, e.g. F_NOT_READABLE
@@ -71,8 +71,9 @@ def _jwt_claims(token: str) -> dict:
 
 class _Pacer:
     """At most one request per `spacing` seconds across all renfe processes sharing `path`: the lock is
-    held for the whole request and the file keeps the last request's wall-clock time. Without a usable
-    lock file it paces this process only."""
+    held for the whole request and the file keeps the last request's wall-clock time. Without file locking
+    (Windows) the file is still read and written, unlocked, so two processes starting at the same instant can
+    both go. Without a usable file it paces this process only."""
 
     def __init__(self, spacing: float, path: Path | None):
         self._spacing = spacing
@@ -80,7 +81,7 @@ class _Pacer:
         self._last: float | None = None
 
     def _open(self) -> int | None:
-        if fcntl is None or self._path is None:
+        if self._path is None:
             return None
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -116,7 +117,7 @@ class _Pacer:
             return
         fd = self._open()
         try:
-            if fd is not None:
+            if fd is not None and fcntl is not None:
                 fcntl.flock(fd, fcntl.LOCK_EX)
             last = max(self._last or 0.0, self._read(fd))
             wait = self._spacing - (time.time() - last)
@@ -129,8 +130,16 @@ class _Pacer:
                 self._write(fd, self._last)
         finally:
             if fd is not None:
-                fcntl.flock(fd, fcntl.LOCK_UN)
+                if fcntl is not None:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
                 os.close(fd)
+
+
+def search_slot(spacing: float, path: Path | None) -> None:
+    """Wait until `spacing` seconds have passed since the last search started on this machine (any renfe process
+    sharing `path`), then mark this one as started. It spaces whole searches, not their requests."""
+    with _Pacer(spacing, path).turn():
+        pass
 
 
 class RsvClient:

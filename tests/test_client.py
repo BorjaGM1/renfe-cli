@@ -36,7 +36,7 @@ def test_anonymous_session_headers():
     assert api_req.headers["channel"] == "VLP"
     assert api_req.headers["x-terminal-id"] == TERMINAL
     assert api_req.headers["session-id"] == fake.requests[3].headers["session-id"]
-    assert "Chrome/" in api_req.headers["user-agent"]
+    assert api_req.headers["user-agent"].startswith("renfe-cli/")
 
 
 def test_post_sends_json():
@@ -157,6 +157,28 @@ def test_pacing_spans_clients_through_the_lock_file(monkeypatch, tmp_path):
         clock[0] += 0.4
         first._send("GET", config.WEB_CONFIG_URL, label="x", headers={})   # 0.4 s later: waits 0.6 s
     assert sleeps == [1.0, 0.6]
+
+
+@pytest.mark.parametrize("locking", [True, False])  # False: no fcntl, as on Windows
+def test_searches_start_at_most_once_a_second_across_processes(monkeypatch, tmp_path, locking):
+    import renfe.client as mod
+
+    if not locking:
+        monkeypatch.setattr(mod, "fcntl", None)
+
+    clock = [5_000_000.0]
+    sleeps = []
+    monkeypatch.setattr(mod.time, "time", lambda: clock[0])
+    monkeypatch.setattr(mod.time, "sleep", lambda s: (sleeps.append(round(s, 3)), clock.__setitem__(0, clock[0] + s)))
+    lock = tmp_path / "search.lock"  # each call reads the file, as another process would
+    mod.search_slot(1.0, lock)  # no wait: no search before
+    mod.search_slot(1.0, lock)  # right after: waits 1 s
+    clock[0] += 0.3
+    mod.search_slot(1.0, lock)  # 0.3 s after the last start: waits 0.7 s
+    clock[0] += 5.0
+    mod.search_slot(1.0, lock)  # long after: no wait
+    mod.search_slot(0.0, lock)  # spacing 0: no wait
+    assert sleeps == [1.0, 0.7]
 
 
 def test_future_pace_timestamp_never_stalls_long(monkeypatch, tmp_path):

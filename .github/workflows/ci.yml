@@ -1,5 +1,5 @@
 # The offline test suite (HTTP is mocked) on every push to main and every pull request. It never calls Renfe:
-# the live tests run only with RENFE_LIVE=1, and the Chrome checkout tests only with RENFE_TEST_CHROME=1.
+# the live tests run only with RENFE_LIVE=1.
 name: CI
 
 on:

@@ -8,7 +8,7 @@ from urllib.parse import parse_qs, unquote
 import httpx
 import pytest
 
-from renfe import cli, legacy, search
+from renfe import cli, config, legacy, search
 from renfe.client import RsvClient
 from renfe.errors import ApiShapeError
 from renfe.stations import parse
@@ -219,8 +219,16 @@ def test_a_bug_is_never_hidden_by_the_fallback(monkeypatch):
 
 
 def test_cli_search_falls_back_with_exit_0(monkeypatch):
+    from datetime import datetime as real_datetime
+
     from typer.testing import CliRunner
 
+    class Frozen(real_datetime):  # "now" before the search date, so it never becomes a date in the past
+        @classmethod
+        def now(cls, tz=None):
+            return real_datetime(2026, 11, 15, 10, 0, tzinfo=search.MADRID)
+
+    monkeypatch.setattr(cli, "datetime", Frozen)
     handler = FakeRenfe(**{"buscarTren.do": lambda r: httpx.Response(403)})
     monkeypatch.setattr(cli, "make_client", lambda: RsvClient(transport=httpx.MockTransport(handler), spacing=0))
     result = CliRunner().invoke(cli.app, ["search", "Madrid", "Barcelona", "-d", "2026-11-20"])
@@ -249,3 +257,18 @@ def test_a_surrogate_pair_is_one_character():
 def test_anything_else_is_unreadable(text):
     with pytest.raises(ApiShapeError):
         legacy.read_literal(text)
+
+
+def test_every_legacy_request_names_the_cli():
+    fake = FakeRenfe()
+    run(fake)
+    agents = {r.headers["user-agent"] for r in fake.requests if r.url.host == "venta.renfe.com"}
+    assert agents and all(agent.startswith("renfe-cli/") for agent in agents)
+
+
+def test_a_search_waits_for_its_slot_before_any_request(monkeypatch):
+    fake, calls = FakeRenfe(), []
+    monkeypatch.setattr(config, "SEARCH_SPACING", 1.0)
+    monkeypatch.setattr(search, "search_slot", lambda spacing, path: calls.append((spacing, path.name, len(fake.requests))))
+    run(fake)
+    assert calls == [(1.0, "search.lock", 0)]

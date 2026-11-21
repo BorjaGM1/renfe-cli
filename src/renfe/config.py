@@ -8,20 +8,26 @@ import os
 from datetime import date
 from pathlib import Path
 
+from . import package_version
+
 WEB_ORIGIN = "https://venta.rsv.renfe.com"
 WEB_CONFIG_URL = f"{WEB_ORIGIN}/config/arch-config.json"
 API_BASE = "https://api.rsv.renfe.com"
 CHANNEL = "VLP"  # the `channel` header the web app sends
-USER_AGENT = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/157.0.0.0 Safari/537.36"
-)
+# The CLI names itself instead of posing as a browser, so Renfe can tell what it is and block it if it wants to.
+# Renfe's map, legacy shop and new system all answered this kind of name on 22 Nov 2026.
+USER_AGENT = f"renfe-cli/{package_version() or 'dev'}"
 ACCEPT_LANGUAGE = "es-ES"
 TIMEZONE = "Europe/Madrid"
 
 # Seconds between requests across every renfe process. 0 = no pause: Renfe answers in 0.1-0.5 s and its
 # web app fires its calls back to back. A block or rate limit still stops the CLI (exit 5).
 REQUEST_SPACING = 0.0
+# Seconds between the starts of two searches across every renfe process on the machine, on both shops. A search's
+# own requests still go out as the web app sends them; this spaces whole searches, so a script or an agent running
+# them in a loop sends at most one a second.
+SEARCH_SPACING = 1.0
+SEARCH_PACE_FILE = "search.lock"  # in the cache dir: the last search's start time
 REQUEST_TIMEOUT = 25.0
 # The legacy shop's timeout per request, its read timeout tried once more (legacy.py). Over 18-20 Nov 2026 the slowest
 # legacy search that got its list took 11.9 s for the whole command (its four requests plus the CLI's start-up), so

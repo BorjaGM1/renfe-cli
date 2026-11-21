@@ -60,3 +60,12 @@ def retry_pauses(request, monkeypatch):
 
         monkeypatch.setattr(retry, "_sleep", pauses.append)
     return pauses
+
+
+@pytest.fixture(autouse=True)
+def no_search_gap(request, monkeypatch):
+    """Offline searches don't wait for each other (test_client.py checks the gap itself); the live tests, which
+    reach Renfe, keep it."""
+    if request.node.get_closest_marker("live"):
+        return
+    monkeypatch.setattr(config, "SEARCH_SPACING", 0.0)

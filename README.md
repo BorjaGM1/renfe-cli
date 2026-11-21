@@ -22,10 +22,9 @@ scripts and AI agents can use it as easily as people. No account, no API key, an
   `search`, `status`, `watch` and `delays` find the live train either way.
 - **About 1,400 stations ship with the CLI**, matched by name (accents and case ignored) or code, with
   spelling suggestions for a typo.
-- **Buy on Renfe's website.** `renfe open` opens the right shop with the route filled in. For trips on
-  the legacy shop, `renfe checkout` takes you through guest checkout in Chrome.
-- **Gentle with Renfe.** It sends what the website sends, retries only one-off failures, and stops when
-  Renfe blocks it.
+- **Buy on Renfe's website.** `renfe open` opens the right shop with the route filled in.
+- **Gentle with Renfe.** It sends the requests the website sends, under its own name, starts at most one
+  search a second on a machine, retries only one-off failures, and stops when Renfe blocks it.
 
 ## Install
 
@@ -112,7 +111,6 @@ renfe search Madrid Barcelona -d 2027-01-29 --after 08:00 --limit 2 \
 | `renfe stations [QUERY]` | Stations and city groups matching a name or code, best match first |
 | `renfe search FROM TO` | Trains on a date, with times, changes and fares for one adult; for today, live delays too |
 | `renfe open FROM TO` | Opens Renfe's shop for that search in your browser, or prints the link |
-| `renfe checkout FROM TO` | Guest checkout in Chrome, for trips before 25 Jan 2027 |
 | `renfe delays [TRAIN]` | Every delayed train on the live map, with its scheduled departure and arrival |
 | `renfe status TRAIN` | One train's live delay, its next station and the expected arrival there |
 | `renfe watch TRAIN` | A JSON line each time that train's live status changes |
@@ -173,7 +171,7 @@ only from 25 Jan 2027 and before that knows only some trains (for Madrid–Barce
 same JSON (Madrid–Barcelona on Friday 27 Nov 2026, checked 2026-11-17: 24 trains, cheapest €31.15).
 There, `type_code` and `intermediate_stops` are `null`, and a train that isn't on sale (full, "not on
 sale at the moment", not running, or only wheelchair places left) has `available: false` and no fares.
-`renfe search` only reads the list. Start a booking separately with `renfe checkout`.
+`renfe search` only reads the list. Buy on Renfe's site with `renfe open`.
 
 A one-off failure at any of the legacy shop's four requests (a 500 or 502 without `Retry-After`, whatever
 its body, or a dropped connection) starts its search over from the first request, with a new guest session
@@ -201,8 +199,10 @@ against the web for Friday 29 Jan: 22 trains each).
 
 ### Requests, speed and retries
 
-The CLI sends what the
-website sends, no more: one timetable call, then fares 3 trains per call with at most 3 calls in
+Every request names the CLI in its User-Agent (`renfe-cli/` and the version) instead of posing as a
+browser, so Renfe can tell what it is. Searches are spaced: on one machine at most one starts per second,
+across every `renfe` process, so a script or an agent running them in a loop can't burst; a single search's
+own requests aren't slowed. The CLI sends what the website sends, no more: one timetable call, then fares 3 trains per call with at most 3 calls in
 flight; before 25 Jan 2027, the four requests the legacy shop's results page makes. If Renfe blocks
 or rate-limits it, it stops and says so (exit 5); before 25 Jan 2027 it falls back instead (see
 [above](#before-25-jan-2027-renfes-legacy-shop)). What it retries: a one-off failure (a 500, 502, 503 or 504 with a JSON or empty body, or a
@@ -242,45 +242,6 @@ that day and show it, so you know which one to pick. With `open`, you pick the t
 - `--train` is checked against the full list (before 25 Jan 2027, the legacy shop's). If the legacy shop
   fails, the CLI sees only the new system's partial list, so a train it can't see still opens the page,
   with a `notice`.
-
-### Checkout with PayPal
-
-For travel before 25 January 2027, start a one-way checkout for one adult with installed Google Chrome.
-To test it, use review mode. It selects the method, reads Renfe’s recalculated total, then closes Chrome
-before payment. You enter real passenger details on Renfe to reach that screen.
-
-```sh
-uv run --extra checkout renfe checkout Madrid Barcelona -d tomorrow --review-only
-```
-
-To buy, omit `--review-only`. Add `--train 03081` to expand a specific service from your search.
-Choose your fare, enter the passenger details and review extras in the window that opens. At payment the
-CLI selects PayPal. You review the total, accept the terms, submit payment and approve it at PayPal.
-Keep that window open as PayPal returns you to Renfe.
-
-The command also accepts `--method card`, `bizum`, `google-pay` or `renfe-points` when Renfe offers
-that option. The capture covers method selection for these alternatives and the complete return for
-PayPal.
-
-For Apple Pay on macOS, run `uv run renfe checkout Madrid Barcelona -d tomorrow --method apple-pay`.
-The CLI opens the route and date in Safari, including when another browser is your default. Choose one
-way, select your fare and choose Apple Pay at payment. The command returns `status: handed_off` when
-Safari opens the link. Follow the outcome in Safari. This path needs no checkout extra. The automated
-price review and receipt checks run only in Chrome, so Apple Pay rejects `--review-only` before opening
-a browser.
-
-A review prints JSON with `status: reviewed`, `selected_method` and the displayed `total`. For a purchase,
-save your ticket and close the checkout window to finish the command. It reports `confirmed` when Renfe
-displays the booking locator and ticket download on its confirmation page. If you close the window
-earlier, it reports `unconfirmed`. If you already approved payment, check your confirmation email before
-trying again. Checkout uses a temporary Chrome profile and writes progress to stderr. Passenger and
-payment details stay out of CLI output.
-
-**Four-month installments.** With `--method aplazame`, checkout looks for Renfe’s four-month card
-option and checks the displayed total against the €150 minimum. In review mode it reports
-`requested_method: aplazame` and `selected_method: card`. To use installments, choose Aplazame under
-“Otras formas de pago” at the card gateway and review the financing terms there. The provider decides
-approval. [Renfe’s Aplazame instructions](https://www.renfe.com/es/es/viajar/informacion-util/donde-comprar/aplazame)
 
 ## Delays
 
@@ -465,7 +426,6 @@ uv sync
 python3 .githooks/pii_check.py enable   # once per clone: the personal-data guard (below)
 uv run renfe --help                     # your working copy
 uv run pytest                           # offline: HTTP is mocked
-RENFE_TEST_CHROME=1 uv run --extra checkout pytest tests/test_checkout.py  # offline, installed Chrome
 RENFE_LIVE=1 uv run pytest -m live      # about 10 real requests, plus one to the live map
 uv run python scripts/update_stations.py  # refresh the shipped station list; prints what changed
 ```
@@ -489,5 +449,8 @@ Enable it once per clone with `python3 .githooks/pii_check.py enable`.
 ## License
 
 [MIT](LICENSE). The station list and train-number groups in `src/renfe/data/` come from Renfe's own
-data and aren't covered by the MIT license. Renfe is a trademark of its owner; this project uses the name
-only to say which service it works with.
+data and aren't covered by the MIT license. The station list is the one Renfe's web app loads (its station
+master data), refreshed with `scripts/update_stations.py`. Renfe is a trademark of its owner; this project
+uses the name only to say which service it works with.
+
+If Renfe objects to anything this project does, open an issue, and that part will change or come out.

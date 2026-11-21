@@ -702,3 +702,14 @@ def test_watch_keeps_live_changes_after_one_failed_timetable_attempt(monkeypatch
     assert [r["delay_minutes"] for r in rows] == [12, 15]
     assert all(r["schedule_match"] == "unavailable" and str(response.status_code) in r["notice"] for r in rows)
     assert [str(r.url) for r in fake.requests].count(TIMETABLE_URL) == 1
+
+
+def test_the_map_request_names_the_cli():
+    agents = []
+
+    def handler(request):
+        agents.append(request.headers["user-agent"])
+        return httpx.Response(200, json={"fechaActualizacion": "2026-11-20T10:00:00", "trenes": []})
+
+    live.fetch(transport=httpx.MockTransport(handler))
+    assert agents and agents[0].startswith("renfe-cli/")

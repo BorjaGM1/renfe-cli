@@ -126,7 +126,7 @@ def _station_key(station: Station) -> str:
 
 
 def search_form(origin: Station, destination: Station, day: date) -> dict[str, str]:
-    """The one-way, one-adult search posted by both the CLI and browser checkout."""
+    """The one-way, one-adult search the results page posts."""
     shown = day.strftime("%d/%m/%Y")
     return {
         "tipoBusqueda": "autocomplete", "currenLocation": "menuBusqueda", "vengoderenfecom": "SI",
