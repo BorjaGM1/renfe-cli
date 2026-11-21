@@ -159,8 +159,12 @@ def test_pacing_spans_clients_through_the_lock_file(monkeypatch, tmp_path):
     assert sleeps == [1.0, 0.6]
 
 
-def test_searches_start_at_most_once_a_second_across_processes(monkeypatch, tmp_path):
+@pytest.mark.parametrize("locking", [True, False])  # False: no fcntl, as on Windows
+def test_searches_start_at_most_once_a_second_across_processes(monkeypatch, tmp_path, locking):
     import renfe.client as mod
+
+    if not locking:
+        monkeypatch.setattr(mod, "fcntl", None)
 
     clock = [5_000_000.0]
     sleeps = []

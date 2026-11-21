@@ -4,8 +4,6 @@ The open command builds the link and, when asked, opens it in your browser. A li
 select a train, so the page opens on that day's search and you choose the train there.
 """
 
-import subprocess
-import sys
 import webbrowser
 from datetime import date
 from urllib.parse import urlencode
@@ -39,15 +37,3 @@ def open_in_browser(url: str) -> bool:
         return bool(webbrowser.open(url, new=2))
     except (webbrowser.Error, OSError):
         return False
-
-
-def open_in_safari(url: str) -> bool:
-    """Open Renfe's search in the user's Safari session, where the buyer can use Apple Pay."""
-    if sys.platform != "darwin":
-        return False
-    try:
-        result = subprocess.run(["/usr/bin/open", "-b", "com.apple.Safari", url],
-                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except OSError:
-        return False
-    return result.returncode == 0
