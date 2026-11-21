@@ -219,8 +219,16 @@ def test_a_bug_is_never_hidden_by_the_fallback(monkeypatch):
 
 
 def test_cli_search_falls_back_with_exit_0(monkeypatch):
+    from datetime import datetime as real_datetime
+
     from typer.testing import CliRunner
 
+    class Frozen(real_datetime):  # "now" before the search date, so it never becomes a date in the past
+        @classmethod
+        def now(cls, tz=None):
+            return real_datetime(2026, 11, 15, 10, 0, tzinfo=search.MADRID)
+
+    monkeypatch.setattr(cli, "datetime", Frozen)
     handler = FakeRenfe(**{"buscarTren.do": lambda r: httpx.Response(403)})
     monkeypatch.setattr(cli, "make_client", lambda: RsvClient(transport=httpx.MockTransport(handler), spacing=0))
     result = CliRunner().invoke(cli.app, ["search", "Madrid", "Barcelona", "-d", "2026-11-20"])
