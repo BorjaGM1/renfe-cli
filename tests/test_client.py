@@ -36,7 +36,7 @@ def test_anonymous_session_headers():
     assert api_req.headers["channel"] == "VLP"
     assert api_req.headers["x-terminal-id"] == TERMINAL
     assert api_req.headers["session-id"] == fake.requests[3].headers["session-id"]
-    assert "Chrome/" in api_req.headers["user-agent"]
+    assert api_req.headers["user-agent"].startswith("renfe-cli/")
 
 
 def test_post_sends_json():

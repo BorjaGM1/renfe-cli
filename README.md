@@ -23,8 +23,8 @@ scripts and AI agents can use it as easily as people. No account, no API key, an
 - **About 1,400 stations ship with the CLI**, matched by name (accents and case ignored) or code, with
   spelling suggestions for a typo.
 - **Buy on Renfe's website.** `renfe open` opens the right shop with the route filled in.
-- **Gentle with Renfe.** It sends what the website sends, retries only one-off failures, and stops when
-  Renfe blocks it.
+- **Gentle with Renfe.** It sends the requests the website sends, under its own name, retries only one-off
+  failures, and stops when Renfe blocks it.
 
 ## Install
 
@@ -199,8 +199,8 @@ against the web for Friday 29 Jan: 22 trains each).
 
 ### Requests, speed and retries
 
-The CLI sends what the
-website sends, no more: one timetable call, then fares 3 trains per call with at most 3 calls in
+Every request names the CLI in its User-Agent (`renfe-cli/` and the version) instead of posing as a
+browser, so Renfe can tell what it is. The CLI sends what the website sends, no more: one timetable call, then fares 3 trains per call with at most 3 calls in
 flight; before 25 Jan 2027, the four requests the legacy shop's results page makes. If Renfe blocks
 or rate-limits it, it stops and says so (exit 5); before 25 Jan 2027 it falls back instead (see
 [above](#before-25-jan-2027-renfes-legacy-shop)). What it retries: a one-off failure (a 500, 502, 503 or 504 with a JSON or empty body, or a

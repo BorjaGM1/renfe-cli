@@ -257,3 +257,10 @@ def test_a_surrogate_pair_is_one_character():
 def test_anything_else_is_unreadable(text):
     with pytest.raises(ApiShapeError):
         legacy.read_literal(text)
+
+
+def test_every_legacy_request_names_the_cli():
+    fake = FakeRenfe()
+    run(fake)
+    agents = {r.headers["user-agent"] for r in fake.requests if r.url.host == "venta.renfe.com"}
+    assert agents and all(agent.startswith("renfe-cli/") for agent in agents)
