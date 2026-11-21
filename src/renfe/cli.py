@@ -18,7 +18,7 @@ try:  # Typer >= 0.29 vendors Click; older Typer uses the click package
 except ImportError:  # pragma: no cover
     from click import exceptions as click_exceptions
 
-from . import checkout as checkout_mod, config, delays as delays_mod, live, package_version
+from . import config, delays as delays_mod, live, package_version
 from . import search as search_mod, shop as shop_mod, stations as stations_mod
 from .client import RsvClient
 from .errors import ApiShapeError, RenfeError, UpstreamError, UsageError
@@ -409,32 +409,6 @@ def open_cmd(
         opened = shop_mod.open_in_browser(page["url"]) if launch else False
         return {"date": day.isoformat(), "origin": src.to_dict(), "destination": dst.to_dict(),
                 "train": chosen, "notice": " ".join(notices) or None, "shop": page, "opened": opened}
-
-    _emit(produce)
-
-
-@app.command("checkout")
-def checkout_cmd(
-    origin: Annotated[str, typer.Argument(help="Departure station or code.")],
-    destination: Annotated[str, typer.Argument(help="Arrival station or code.")],
-    date_: Annotated[str, typer.Option("--date", "-d", help="Travel date.")] = "today",
-    train: Annotated[str | None, typer.Option("--train", "-t", help="Expand this train in Chrome or show its number for manual selection in Safari.")] = None,
-    method: Annotated[checkout_mod.Method, typer.Option(
-        help="Payment method to select on Renfe.")] = checkout_mod.Method.paypal,
-    review_only: Annotated[bool, typer.Option(help="Stop after selecting the method, before payment.")] = False,
-) -> None:
-    """Start a one-way guest checkout in Chrome, or open Safari for Apple Pay on macOS."""
-    def produce() -> dict:
-        day = _parse_date(date_)
-        if day >= config.NSV_FIRST_SALE_DATE:
-            raise UsageError(f"Checkout supports the legacy shop for trips before {config.NSV_FIRST_SALE_DATE}. "
-                             "Use `renfe open` for this date.")
-        parts = _service_parts(train) if train is not None else None
-        if train is not None and parts is None:
-            raise UsageError("--train must be a train number or a sequence such as 00601+00533")
-        with make_client() as client:
-            src, dst = _stations(client, origin, destination)
-        return checkout_mod.checkout(src, dst, day, method, parts, review_only, lambda msg: typer.echo(msg, err=True))
 
     _emit(produce)
 
