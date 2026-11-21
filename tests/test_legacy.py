@@ -8,7 +8,7 @@ from urllib.parse import parse_qs, unquote
 import httpx
 import pytest
 
-from renfe import cli, legacy, search
+from renfe import cli, config, legacy, search
 from renfe.client import RsvClient
 from renfe.errors import ApiShapeError
 from renfe.stations import parse
@@ -264,3 +264,11 @@ def test_every_legacy_request_names_the_cli():
     run(fake)
     agents = {r.headers["user-agent"] for r in fake.requests if r.url.host == "venta.renfe.com"}
     assert agents and all(agent.startswith("renfe-cli/") for agent in agents)
+
+
+def test_a_search_waits_for_its_slot_before_any_request(monkeypatch):
+    fake, calls = FakeRenfe(), []
+    monkeypatch.setattr(config, "SEARCH_SPACING", 1.0)
+    monkeypatch.setattr(search, "search_slot", lambda spacing, path: calls.append((spacing, path.name, len(fake.requests))))
+    run(fake)
+    assert calls == [(1.0, "search.lock", 0)]

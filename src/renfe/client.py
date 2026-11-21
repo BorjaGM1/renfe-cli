@@ -133,6 +133,13 @@ class _Pacer:
                 os.close(fd)
 
 
+def search_slot(spacing: float, path: Path | None) -> None:
+    """Wait until `spacing` seconds have passed since the last search started on this machine (any renfe process
+    sharing `path`), then mark this one as started. It spaces whole searches, not their requests."""
+    with _Pacer(spacing, path).turn():
+        pass
+
+
 class RsvClient:
     def __init__(
         self,

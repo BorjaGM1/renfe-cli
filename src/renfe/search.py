@@ -16,7 +16,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from . import config, legacy, shop
-from .client import RsvClient
+from .client import RsvClient, search_slot
 from .errors import ApiShapeError, BlockedError, RenfeError
 from .stations import Station
 
@@ -264,6 +264,7 @@ def search(
     with a notice. `after` keeps trains leaving at or after that local time. `now` (aware), when given, lets an
     empty legacy list for today count as the day being over (see below). The CLI sets `from_now` for today
     without an explicit departure time. `arrive_by` is an inclusive deadline on the search date in Madrid."""
+    search_slot(config.SEARCH_SPACING, config.cache_dir() / config.SEARCH_PACE_FILE)
     names = names or {}
     notices: list[str] = []
     sold_here = day >= config.NSV_FIRST_SALE_DATE

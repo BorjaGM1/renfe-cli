@@ -23,8 +23,8 @@ scripts and AI agents can use it as easily as people. No account, no API key, an
 - **About 1,400 stations ship with the CLI**, matched by name (accents and case ignored) or code, with
   spelling suggestions for a typo.
 - **Buy on Renfe's website.** `renfe open` opens the right shop with the route filled in.
-- **Gentle with Renfe.** It sends the requests the website sends, under its own name, retries only one-off
-  failures, and stops when Renfe blocks it.
+- **Gentle with Renfe.** It sends the requests the website sends, under its own name, starts at most one
+  search a second on a machine, retries only one-off failures, and stops when Renfe blocks it.
 
 ## Install
 
@@ -200,7 +200,9 @@ against the web for Friday 29 Jan: 22 trains each).
 ### Requests, speed and retries
 
 Every request names the CLI in its User-Agent (`renfe-cli/` and the version) instead of posing as a
-browser, so Renfe can tell what it is. The CLI sends what the website sends, no more: one timetable call, then fares 3 trains per call with at most 3 calls in
+browser, so Renfe can tell what it is. Searches are spaced: on one machine at most one starts per second,
+across every `renfe` process, so a script or an agent running them in a loop can't burst; a single search's
+own requests aren't slowed. The CLI sends what the website sends, no more: one timetable call, then fares 3 trains per call with at most 3 calls in
 flight; before 25 Jan 2027, the four requests the legacy shop's results page makes. If Renfe blocks
 or rate-limits it, it stops and says so (exit 5); before 25 Jan 2027 it falls back instead (see
 [above](#before-25-jan-2027-renfes-legacy-shop)). What it retries: a one-off failure (a 500, 502, 503 or 504 with a JSON or empty body, or a
@@ -447,5 +449,8 @@ Enable it once per clone with `python3 .githooks/pii_check.py enable`.
 ## License
 
 [MIT](LICENSE). The station list and train-number groups in `src/renfe/data/` come from Renfe's own
-data and aren't covered by the MIT license. Renfe is a trademark of its owner; this project uses the name
-only to say which service it works with.
+data and aren't covered by the MIT license. The station list is the one Renfe's web app loads (its station
+master data), refreshed with `scripts/update_stations.py`. Renfe is a trademark of its owner; this project
+uses the name only to say which service it works with.
+
+If Renfe objects to anything this project does, open an issue, and that part will change or come out.

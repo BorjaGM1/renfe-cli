@@ -60,3 +60,9 @@ def retry_pauses(request, monkeypatch):
 
         monkeypatch.setattr(retry, "_sleep", pauses.append)
     return pauses
+
+
+@pytest.fixture(autouse=True)
+def no_search_gap(monkeypatch):
+    """Searches in tests don't wait for each other; test_client.py checks the gap itself."""
+    monkeypatch.setattr(config, "SEARCH_SPACING", 0.0)
